@@ -2,25 +2,10 @@ import * as Cesium from 'cesium';
 import { StyleManager } from './ui.js';
 import { flyToAustin } from './camera.js';
 import { DataLayerManager } from './data/manager.js';
-import flightsLayer from './data/flights.js';
-import militaryFlightsLayer from './data/militaryFlights.js';
-import earthquakesLayer from './data/earthquakes.js';
-import satellitesLayer from './data/satellites.js';
-import rocketLaunchesLayer from './data/rocketLaunches.js';
-import trafficLayer from './data/traffic.js';
-import cctvLayer from './data/cctv.js';
-import radioLayer from './data/radio.js';
-import bikeshareLayer from './data/bikeshare.js';
-import aisLiveVesselsLayer from './data/aisLiveVessels.js';
-import militaryInstallationsLayer from './data/militaryInstallations.js';
-import militaryAwarenessLayer from './data/militaryAwareness.js';
-import localDataLayers from './data/localLayers.js';
+import { LAZY_LAYER_MANIFEST } from './data/layerManifest.js';
 import { LAYER_STATE_REGISTRY } from './data/layerState.js';
 import { registerDataCredits } from './data/dataCredits.js';
-import { SceneDirector } from './scenes/director.js';
-import { initGevVoiceCommands } from './voice/gevRealtime.js';
 import { MapStackController } from './mapStackController.js';
-import { initAnnotations } from './annotations/index.js';
 import { initLogoGaze } from './logoGaze.js';
 import { initCockpitCloudEffects } from './cockpitCloudEffects.js';
 import {
@@ -30,10 +15,12 @@ import {
   holdContinuousRender,
   releaseContinuousRender,
 } from './renderGovernor.js';
+import { installAdaptiveQuality, detectLowEndProfile, getAdaptiveQualityDiagnostics } from './quality/adaptiveQuality.js';
 import { installScopeMask } from './scopeMask.js';
 import { initFirstRunExperience } from './firstRunExperience.js';
 import { initKeySetup } from './keySetup.js';
 import { loadPhotorealisticTileset } from './mapStartup.js';
+import { initLanShareToken } from './lanToken.js';
 
 initLogoGaze();
 
@@ -73,6 +60,10 @@ async function init() {
   const loaderStatus = loadingScreen.querySelector('.loader-status');
 
   try {
+    // LAN-share session token (SECURITY): ingest + attach before any /api
+    // traffic. No-op in loopback mode.
+    void initLanShareToken();
+
     loaderStatus.textContent = 'Configuring viewer...';
 
     // A direct Google key provides Google 3D plus GEV place search. Cesium ion
@@ -108,13 +99,35 @@ async function init() {
         document.body.appendChild(el);
         return el;
       })(),
-      msaaSamples: 4,
+      // Adaptive MSAA (perf): 4× AA is a fixed GPU tax that integrated
+      // graphics and phones cannot afford; low-end profiles start at 1× and
+      // everyone else starts at 4×, then the adaptive-quality manager steps
+      // it live with measured FPS (see src/quality/adaptiveQuality.js).
+      msaaSamples: lowEndProfile ? 1 : 4,
       contextOptions: {
         webgl: {
-          preserveDrawingBuffer: true,
+          // preserveDrawingBuffer defaults to false (perf): the flag forces
+          // extra buffer copies on every frame. The ONLY Cesium-canvas
+          // consumer (voice viewport capture) already reads inside its
+          // postRender task via renderFreshCesiumFrame(), which is the
+          // documented capture-safe pattern without buffer preservation.
+          // All other toDataURL()/getImageData() sites use their own
+          // offscreen 2D canvases, unaffected by this flag.
+          preserveDrawingBuffer: false,
         },
       },
     });
+
+    // Low-end hardware profile (perf): detected once, applied to the viewer
+    // construction above and published to label/detection budgets via
+    // getLabelBudgetScale(). ?profile=low forces it; ?profile=high disables.
+    const lowEndProfile = detectLowEndProfile();
+
+    // Adaptive render quality (perf): FPS-sampled resolution/MSAA tiering
+    // with hysteresis, plus the low-end starting tier. Installs after the
+    // viewer exists; owns resolutionScale/msaaSamples/tile screen-space
+    // error and nothing else.
+    installAdaptiveQuality(viewer, { lowEnd: lowEndProfile });
 
     // Cap the default render loop at 60 fps. Cesium's loop otherwise runs at
     // the display's refresh rate — 120 Hz on ProMotion panels — doubling GPU
@@ -207,22 +220,22 @@ async function init() {
     const dataManager = new DataLayerManager(viewer, {
       allowQaRegistration: import.meta.env.DEV,
     });
-    dataManager.register(flightsLayer);
-    dataManager.register(militaryFlightsLayer);
-    dataManager.register(earthquakesLayer);
-    dataManager.register(satellitesLayer);
-    dataManager.register(rocketLaunchesLayer);
-    rocketLaunchesLayer.attachDataManager(dataManager);
-    dataManager.register(trafficLayer);
-    dataManager.register(cctvLayer);
-    dataManager.register(radioLayer);
-    dataManager.register(bikeshareLayer);
-    dataManager.register(aisLiveVesselsLayer);
-    dataManager.register(militaryInstallationsLayer);
-    dataManager.register(militaryAwarenessLayer);
-    militaryAwarenessLayer.attachDataManager(dataManager);
-    for (const layer of localDataLayers) {
-      dataManager.register(layer);
+    // Lazy layer registration (perf): the toggle panel renders from the
+    // manifest metadata, and each layer's implementation module — with its
+    // imports, workers, and dataset code — is only fetched and parsed when
+    // the layer is first enabled or restored. This removes every data-layer
+    // module from the eager boot graph.
+    for (const entry of LAZY_LAYER_MANIFEST) {
+      const { loader, ...meta } = entry;
+      dataManager.registerLazy(meta, () => loader().then((mod) => {
+        // Modules that want the manager during their own import side
+        // (rocketLaunches' pending-restore lane, militaryAwareness' context
+        // adoption) get it attached the moment their module resolves.
+        if (typeof mod.default?.attachDataManager === 'function') {
+          mod.default.attachDataManager(dataManager);
+        }
+        return mod;
+      }));
     }
     // Restoration starts only after the complete production registry is sealed.
     dataManager.finalizeRegistrations(LAYER_STATE_REGISTRY);
@@ -239,11 +252,53 @@ async function init() {
     dataManager.buildTogglePanel(document.getElementById('data-toggles'));
     styleManager.attachDataManager(dataManager);
 
-    // Initialize deterministic scene playback for social clip capture
-    const sceneDirector = new SceneDirector(viewer, styleManager, dataManager);
-
-    // Initialize the voice "whiteboard" annotation engine (world-space renderer)
-    const annotations = initAnnotations({ viewer, tileset });
+    // Deferred subsystems (perf): the voice stack (OpenAI Realtime + voice
+    // modules, ~540 KB source), the annotation engine (~312 KB), and the
+    // scene director (~108 KB) are not needed for the first globe paint.
+    // They stream in once the main thread goes idle after first paint, or
+    // immediately on the first user interaction — whichever comes first.
+    // The voice mic button is created by initGevVoiceCommands itself, so
+    // deferral cannot leave a dead control on screen: the chip appears when
+    // this subsystem lands (well before a user could reach for it).
+    const deferredSubsystems = { sceneDirector: null, annotations: null, voiceCommands: null };
+    let deferredInitStarted = false;
+    const initDeferredSubsystems = async () => {
+      if (deferredInitStarted) return;
+      deferredInitStarted = true;
+      try {
+        const [{ SceneDirector }, { initAnnotations }, { initGevVoiceCommands }] = await Promise.all([
+          import('./scenes/director.js'),
+          import('./annotations/index.js'),
+          import('./voice/gevRealtime.js'),
+        ]);
+        deferredSubsystems.sceneDirector = new SceneDirector(viewer, styleManager, dataManager);
+        deferredSubsystems.annotations = initAnnotations({ viewer, tileset });
+        deferredSubsystems.voiceCommands = initGevVoiceCommands({
+          viewer,
+          styleManager,
+          dataManager,
+          sceneDirector: deferredSubsystems.sceneDirector,
+          annotations: deferredSubsystems.annotations,
+        });
+      } catch (error) {
+        console.warn('[Init] deferred subsystem (voice/annotations/scenes) load failed:', error);
+      }
+    };
+    const scheduleDeferredSubsystems = () => {
+      // Idle after first paint when supported; otherwise a short settle
+      // delay keeps these off the critical rendering path either way.
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(initDeferredSubsystems, { timeout: 4000 });
+      } else {
+        setTimeout(initDeferredSubsystems, 1500);
+      }
+    };
+    const accelerateDeferredSubsystems = () => {
+      if (deferredInitStarted) return;
+      void initDeferredSubsystems();
+    };
+    window.addEventListener('pointerdown', accelerateDeferredSubsystems, { once: true, capture: true });
+    window.addEventListener('keydown', accelerateDeferredSubsystems, { once: true, capture: true });
 
     // Keep startup chrome truthful: a share is not restored until camera,
     // visual/map/panel lanes, and every requested layer have terminated.
@@ -252,6 +307,9 @@ async function init() {
       new Promise((resolve) => setTimeout(resolve, 1000)),
     ]).finally(() => {
       loadingScreen.classList.add('hidden');
+      // First paint is committed — the voice/annotations/scenes subsystem
+      // can now stream in without competing with boot for the main thread.
+      scheduleDeferredSubsystems();
       // Reveal only after the loading cover has yielded. transitionend can be
       // absent under reduced motion, so a bounded fallback makes this reliable.
       let firstRunRevealed = false;
@@ -300,10 +358,10 @@ async function init() {
       viewer.useDefaultRenderLoop = !hidden;
       cockpitCloudEffects?.setSuspended?.(hidden);
       if (!hidden) {
-        if (dataManager._panelRefreshPendingOnVisible) {
-          dataManager._panelRefreshPendingOnVisible = false;
-          dataManager._refreshTogglePanel();
-        }
+        // Public facade (no private-field reach-through): consumes the
+        // pending panel refresh exactly as the visibilitychange contract
+        // requires.
+        dataManager.consumePanelRefreshPendingOnVisible();
         governorRequestRender('visibility-restore');
       }
     };
@@ -318,15 +376,26 @@ async function init() {
       styleManager,
       tileset,
       dataManager,
-      sceneDirector,
       mapStackController,
-      annotations,
       weatherEffects,
       cockpitCloudEffects,
       getRenderGovernorDiagnostics,
+      getAdaptiveQualityDiagnostics,
       requestRender: governorRequestRender,
+      // Lazy subsystem accessors: voice/annotations/scenes land after
+      // first paint (idle) or first interaction. Reading these properties
+      // before then yields null; initDeferredSubsystems() forces the load.
+      get sceneDirector() {
+        return deferredSubsystems.sceneDirector;
+      },
+      get annotations() {
+        return deferredSubsystems.annotations;
+      },
+      get voiceCommands() {
+        return deferredSubsystems.voiceCommands;
+      },
+      initDeferredSubsystems,
     };
-    window.__godsEyeView.voiceCommands = initGevVoiceCommands({ viewer, styleManager, dataManager, sceneDirector, annotations });
 
   } catch (error) {
     console.error("God's Eye View initialization failed:", error);

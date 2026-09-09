@@ -531,7 +531,7 @@ test('double-toggle during the awaited enable leaves the layer OFF with no leake
   assert.equal(mgr.isEnabled('flights'), false, 'layer should end disabled');
   // ...and NO interval is left running (the leak this fix prevents).
   const entry = mgr.layers.get('flights');
-  assert.equal(entry.intervalId, null, 'no polling interval should be armed');
+  assert.equal(entry.feedJobId, null, 'no polling feed job should be armed');
 });
 
 test('serialized toggles never arm two intervals (2× poll → 429 guard)', async () => {
@@ -545,10 +545,10 @@ test('serialized toggles never arm two intervals (2× poll → 429 guard)', asyn
 
   assert.equal(mgr.isEnabled('military'), true, 'odd number of toggles ends enabled');
   const entry = mgr.layers.get('military');
-  assert.notEqual(entry.intervalId, null, 'exactly one interval should be armed');
+  assert.notEqual(entry.feedJobId, null, 'exactly one feed job should be armed');
   // enable ran twice, disable once — and only one interval survives.
   assert.ok(layer.calls.enable >= 1, 'enable was called');
-  clearInterval(entry.intervalId); // don't leak the timer out of the test
+  mgr._disarmUpdateLoop(entry); // don't leak the feed job out of the test
 });
 
 test('setEnabled is idempotent and serializes with toggle', async () => {
@@ -564,7 +564,7 @@ test('setEnabled is idempotent and serializes with toggle', async () => {
   await mgr.setEnabled('satellites', false);
   assert.equal(mgr.isEnabled('satellites'), false);
   const entry = mgr.layers.get('satellites');
-  assert.equal(entry.intervalId, null, 'stats interval cleared on disable');
+  assert.equal(entry.feedJobId, null, 'stats feed job cleared on disable');
 });
 
 test('idempotent absolute intent publishes its newer origin without rerunning lifecycle', async () => {
@@ -633,7 +633,7 @@ test('an aborted enable is transactionally cancelled without a settled visibilit
   assert.equal(mgr.isEnabled('radio'), true);
   assert.equal(moduleActive, false, 'module cleanup completed before reporting failure');
   assert.equal(mgr.layers.get('radio').lifecycleUncertain, true);
-  assert.equal(mgr.layers.get('radio').intervalId, null);
+  assert.equal(mgr.layers.get('radio').feedJobId, null);
   assert.equal(changes.some(({ type }) => type === 'visibility'), false);
   assert.equal(changes.at(-1)?.type, 'visibility-failed');
   assert.equal(changes.at(-1)?.phase, 'cancel-enable-cleanup');
@@ -644,13 +644,13 @@ test('an aborted enable is transactionally cancelled without a settled visibilit
   assert.equal(moduleActive, true, 'same-state retry performs real enable work');
   assert.equal(mgr.isEnabled('radio'), true);
   assert.equal(mgr.layers.get('radio').lifecycleUncertain, false);
-  assert.notEqual(mgr.layers.get('radio').intervalId, null);
+  assert.notEqual(mgr.layers.get('radio').feedJobId, null);
   assert.equal(
     changes.filter(({ type }) => type === 'visibility').length,
     visibilityBeforeRetry + 1,
     'only the reconciled retry emits settled visibility',
   );
-  clearInterval(mgr.layers.get('radio').intervalId);
+  mgr._disarmUpdateLoop(mgr.layers.get('radio'));
 });
 
 test('failed enable cleanup leaves reconciliation debt instead of skipping a same-state retry', async (t) => {
@@ -690,7 +690,7 @@ test('failed enable cleanup leaves reconciliation debt instead of skipping a sam
         assert.equal(moduleActive, false, 'cleanup made the module inactive');
         assert.equal(mgr.isEnabled(layer.module.id), true, 'manager remains conservatively ON');
         assert.equal(mgr.layers.get(layer.module.id).lifecycleUncertain, true);
-        assert.equal(mgr.layers.get(layer.module.id).intervalId, null);
+        assert.equal(mgr.layers.get(layer.module.id).feedJobId, null);
         assert.equal(changes.some(({ type }) => type === 'visibility'), false);
         assert.equal(changes.at(-1)?.type, 'visibility-failed');
         assert.equal(changes.at(-1)?.phase, phase);
@@ -703,9 +703,9 @@ test('failed enable cleanup leaves reconciliation debt instead of skipping a sam
         assert.equal(moduleActive, true);
         assert.equal(mgr.isEnabled(layer.module.id), true);
         assert.equal(mgr.layers.get(layer.module.id).lifecycleUncertain, false);
-        assert.notEqual(mgr.layers.get(layer.module.id).intervalId, null);
+        assert.notEqual(mgr.layers.get(layer.module.id).feedJobId, null);
         assert.equal(changes.filter(({ type }) => type === 'visibility').length, 1);
-        clearInterval(mgr.layers.get(layer.module.id).intervalId);
+        mgr._disarmUpdateLoop(mgr.layers.get(layer.module.id));
       });
     }
   }
@@ -744,7 +744,7 @@ test('failed disable is uncertain and same-state enable reconciles module author
   assert.equal(moduleActive, true);
   assert.equal(mgr.layers.get(layer.module.id).lifecycleUncertain, false);
   assert.equal(changes.filter(({ type }) => type === 'visibility').length, 1);
-  clearInterval(mgr.layers.get(layer.module.id).intervalId);
+  mgr._disarmUpdateLoop(mgr.layers.get(layer.module.id));
 });
 
 test('abort rejections from init and enable are cancellations, not lifecycle failures', async (t) => {
@@ -1204,7 +1204,7 @@ test('newer absolute OFF supersedes a slow ON before settled publication', async
   assert.deepEqual(await Promise.all([enabling, disabling]), [false, true]);
   assert.equal(mgr.isEnabled('radio'), false);
   assert.equal(moduleActive, false);
-  assert.equal(mgr.layers.get('radio').intervalId, null);
+  assert.equal(mgr.layers.get('radio').feedJobId, null);
   assert.deepEqual(
     changes.filter(({ type }) => type === 'visibility')
       .map(({ enabled, origin, notificationToken }) => ({ enabled, origin, notificationToken })),
@@ -1459,7 +1459,7 @@ test('re-entrant absolute request during lifecycle presentation owns settlement 
   assert.equal(await reentrantDisable, true);
   assert.equal(moduleActive, false);
   assert.equal(mgr.isEnabled('radio'), false);
-  assert.equal(mgr.layers.get('radio').intervalId, null);
+  assert.equal(mgr.layers.get('radio').feedJobId, null);
   assert.deepEqual(
     changes.filter(({ type }) => type === 'visibility')
       .map(({ enabled, origin }) => ({ enabled, origin })),
@@ -1648,7 +1648,7 @@ test('failed asynchronous disable stays enabled and reports an explicit lifecycl
 
   assert.equal(changed, false);
   assert.equal(mgr.isEnabled('flights'), true, 'manager must not publish a false disabled state');
-  assert.notEqual(mgr.layers.get('flights').intervalId, null, 'the live refresh interval remains owned');
+  assert.notEqual(mgr.layers.get('flights').feedJobId, null, 'the live refresh feed job remains owned');
   const failed = changes.find(({ type }) => type === 'visibility-failed');
   assert.deepEqual({
     layerId: failed?.layerId,
@@ -1662,7 +1662,7 @@ test('failed asynchronous disable stays enabled and reports an explicit lifecycl
     error: failure,
   });
 
-  clearInterval(mgr.layers.get('flights').intervalId);
+  mgr._disarmUpdateLoop(mgr.layers.get('flights'));
 });
 
 test('captured enabled set repairs siblings stopped before an isolation failure', async () => {
@@ -1697,8 +1697,8 @@ test('captured enabled set repairs siblings stopped before an isolation failure'
   });
   assert.deepEqual([...mgr.getEnabledLayerIds()], ['flights', 'traffic']);
 
-  clearInterval(mgr.layers.get('flights').intervalId);
-  clearInterval(mgr.layers.get('traffic').intervalId);
+  mgr._disarmUpdateLoop(mgr.layers.get('flights'));
+  mgr._disarmUpdateLoop(mgr.layers.get('traffic'));
 });
 
 test('deferred full restore reconciles an uncertain failed Context shell', async () => {
@@ -2059,7 +2059,7 @@ test('destroyLayer retains an enabled entry when semantic disable fails and perm
   assert.equal(mgr.isEnabled('radio'), true);
   assert.equal(moduleActive, true);
   assert.equal(destroyCalls, 0);
-  assert.notEqual(mgr.layers.get('radio').intervalId, null);
+  assert.notEqual(mgr.layers.get('radio').feedJobId, null);
 
   rejectDisable = false;
   assert.equal(await mgr.destroyLayer('radio'), true);

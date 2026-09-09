@@ -46,6 +46,7 @@ import {
   viewScaleForAltitude,
 } from './detectionPolicy.js';
 import { detectionBracketOpacity } from './detectionPresentation.js';
+import { getLabelBudgetScale } from '../quality/adaptiveQuality.js';
 
 /**
  * @module detection
@@ -1286,7 +1287,14 @@ function _drawOverlay(frame) {
   }
 
   const altitude = _viewer?.camera?.positionCartographic?.height ?? 1e9;
-  const collectiveBudget = labelBudgetFor(altitude, _densityPct);
+  // Quality-tier budget scaling (perf): the low-end hardware profile and the
+  // adaptive quality tiers (see src/quality/adaptiveQuality.js) shrink the
+  // text-callout cap — the PERFORMANCE.md stress scenes showed label churn
+  // as a top FPS cost, so constrained GPUs draw fewer labels, not slower.
+  const collectiveBudget = Math.max(
+    1,
+    Math.round(labelBudgetFor(altitude, _densityPct) * getLabelBudgetScale()),
+  );
   const ambientBudget = Math.max(0, collectiveBudget - Math.min(collectiveBudget, protectedVisibleCount));
   let didSolve = false;
   let solveMs = 0;

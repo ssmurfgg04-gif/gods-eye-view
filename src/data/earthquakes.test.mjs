@@ -1,7 +1,8 @@
 // src/data/earthquakes.test.mjs
 // Focused tests for the pure analyst-record mapper (analyst query engine seam).
 // Pure function — no viewer/DOM needed; imported directly.
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
+import { _resetFeedCacheForTest } from './feedCache.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as Cesium from 'cesium';
@@ -30,6 +31,12 @@ const FULL_RAW = {
   lon: -150.41,
 };
 
+
+// Feed-cache isolation: each test mocks its own upstream, so the module-level
+// TTL cache must not leak responses between tests.
+beforeEach(() => {
+  _resetFeedCacheForTest();
+});
 test('earthquake analyst record: full record maps every contract field', () => {
   const r = mapAnalystRecord(FULL_RAW, 3);
   assert.deepEqual(r, {

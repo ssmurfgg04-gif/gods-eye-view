@@ -4,6 +4,7 @@ import {
   setOverlayEntries,
   setOverlaySourceVisible,
 } from '../overlays/worldOverlay.js';
+import { fetchWithCache } from './feedCache.js';
 
 /**
  * USGS earthquake discs — last 24 hours, M2.5+.
@@ -126,6 +127,8 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
   let _count = 0;
   let _lastUpdate = null;
   let _lastError = null;
+/** True when the served snapshot came from the stale cache (feed outage). */
+let _servingStale = false;
   let _enabled = false;
 
   const layer = {
@@ -157,6 +160,7 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
 
   disable(viewer) {
     _enabled = false;
+    _servingStale = false;
     if (_dataSource) _dataSource.show = false;
     overlayHost.clearSource(EARTHQUAKE_OVERLAY_SOURCE_ID);
     overlayHost.setVisible(EARTHQUAKE_OVERLAY_SOURCE_ID, false);
@@ -164,16 +168,48 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
 
   async update(viewer) {
     try {
-      const response = await fetch(API_URL);
-      if (!response.ok) {
-        _lastError = `USGS HTTP ${response.status}`;
-        console.warn(`[Data:Earthquakes] API returned ${response.status}`);
+      // Serve-stale feed cache (perf): within TTL the cached snapshot
+      // answers directly; on a USGS/network failure the last good snapshot
+      // is served marked stale instead of blanking the layer. Provider
+      // hiccups become "slightly old data", never "no data".
+      const result = await fetchWithCache(API_URL, {
+        // TTL below the 60 s poll cadence so every poll revalidates; the
+        // cache answers from memory only within this window or on failure.
+        ttlMs: 30_000,
+        maxStaleMs: 10 * 60_000,
+      });
+      if (!result.ok && !result.stale) {
+        _lastError = `USGS HTTP ${result.status}`;
+        console.warn(`[Data:Earthquakes] API returned ${result.status}`);
         return false;
       }
-
-      const geojson = await response.json();
+      const geojson = result.json;
       if (!geojson || !Array.isArray(geojson.features)) {
         _lastError = 'Malformed USGS response';
+        return false;
+      }
+      _servingStale = Boolean(result.stale);
+
+      // PR #198 (snapshot validation): validate the ENTIRE snapshot before
+      // touching the live entity set. The old code removed all entities and
+      // then threw on the first malformed feature (missing geometry,
+      // non-finite magnitude, non-array coordinates), leaving the layer
+      // permanently blank until the next successful poll. A bad snapshot now
+      // keeps the previous render intact.
+      const validFeatures = [];
+      for (const feature of geojson.features) {
+        if (!feature || !feature.geometry) continue;
+        const coordinates = feature.geometry.coordinates;
+        if (!Array.isArray(coordinates) || coordinates.length < 2) continue;
+        const [lon, lat, depthKm] = coordinates;
+        const mag = Number(feature.properties?.mag);
+        if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(mag)) continue;
+        if (lon < -180 || lon > 180 || lat < -90 || lat > 90) continue;
+        validFeatures.push(feature);
+      }
+      if (!validFeatures.length && geojson.features.length) {
+        _lastError = 'USGS snapshot failed validation — keeping prior entities';
+        console.warn('[Data:Earthquakes] Snapshot rejected by validation; retained previous entities');
         return false;
       }
 
@@ -181,11 +217,12 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
       let count = 0;
       const overlayEntries = [];
 
-      for (const feature of geojson.features) {
+      for (const feature of validFeatures) {
         const [lon, lat, depthKm] = feature.geometry.coordinates;
-        const mag = feature.properties.mag;
-        const place = feature.properties.place;
-        const time = feature.properties.time;
+        const properties = feature.properties || {};
+        const mag = Number(properties.mag);
+        const place = properties.place;
+        const time = properties.time;
 
         if (mag < 2.5) continue; // Skip micro-quakes
 
@@ -267,6 +304,7 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
     _count = 0;
     _lastUpdate = null;
     _lastError = null;
+    _servingStale = false;
   },
 
   /**
@@ -307,6 +345,9 @@ export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = 
       count: _count,
       lastUpdate: _lastUpdate,
       error: _lastError,
+      // The manager's feed-state chip renders STALE from this flag — a
+      // provider outage shows honestly as old data instead of nominal.
+      stale: _servingStale,
     };
   },
   };

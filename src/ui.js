@@ -56,23 +56,33 @@ import {
   normalizeProfile,
   profileForDensity,
 } from './data/detectionPolicy.js';
-import trafficLayer from './data/traffic.js';
-import flightsLayer from './data/flights.js';
-import militaryFlightsLayer from './data/militaryFlights.js';
-import { isTr3b, toggleTr3b } from './data/tr3bRegistry.js';
-import satellitesLayer from './data/satellites.js';
-import cctvLayer from './data/cctv.js';
-import radioLayer, {
+// Layer modules are accessed LAZILY (perf): statically importing all 17
+// implementations here dragged every layer into the eager boot graph and
+// defeated the manager's lazy registration. The accessors forward to the
+// live module once DataLayerManager loads it; before that, every property
+// is a safe no-op so `layer.fn?.()` call sites behave exactly like a module
+// that declines the request. Panel wiring done too early re-runs on the
+// manager's 'module-loaded' event (see attachDataManager).
+import { createLazyLayerAccessor } from './data/layerAccess.js';
+import {
   buildRadioTunerTicks,
   radioTunerCommitSlot,
   radioTunerPointerPosition,
   radioTunerSlot,
-} from './data/radio.js';
-import bikeshareLayer from './data/bikeshare.js';
-import aisLiveVesselsLayer from './data/aisLiveVessels.js';
-import militaryAwarenessLayer from './data/militaryAwareness.js';
-import militaryInstallationsLayer from './data/militaryInstallations.js';
-import rocketLaunchesLayer from './data/rocketLaunches.js';
+} from './data/radioTunerMath.js';
+import { isTr3b, toggleTr3b } from './data/tr3bRegistry.js';
+
+const trafficLayer = createLazyLayerAccessor('traffic');
+const flightsLayer = createLazyLayerAccessor('flights');
+const militaryFlightsLayer = createLazyLayerAccessor('military');
+const satellitesLayer = createLazyLayerAccessor('satellites');
+const cctvLayer = createLazyLayerAccessor('cctv');
+const radioLayer = createLazyLayerAccessor('radio');
+const bikeshareLayer = createLazyLayerAccessor('bikeshare');
+const aisLiveVesselsLayer = createLazyLayerAccessor('ais-live-vessels');
+const militaryAwarenessLayer = createLazyLayerAccessor('military-awareness');
+const militaryInstallationsLayer = createLazyLayerAccessor('military-installations');
+const rocketLaunchesLayer = createLazyLayerAccessor('rocket-launches');
 import {
   aggregateLayerLoading,
   canPresentDeferredStatusNotice,
@@ -4338,6 +4348,40 @@ export class StyleManager {
    * @param {object|null} dataManager - The DataManager instance, or null to detach.
    * @returns {void}
    */
+  /**
+   * (Re)wire layer panel subscriptions. Runs once at attach and again for
+   * every 'module-loaded' manager change: lazily-registered layers resolve
+   * their implementation only on first enable, and the CCTV/Radio panels
+   * subscribe to module-level state streams that exist only after load.
+   * Each re-run is idempotent — the previous subscription is released first.
+   */
+  _wireLayerPanelSubscriptions() {
+    if (this._cctvUnsubscribe) {
+      this._cctvUnsubscribe();
+      this._cctvUnsubscribe = null;
+    }
+    if (typeof cctvLayer.subscribe === 'function') {
+      this._cctvUnsubscribe = cctvLayer.subscribe((state) => {
+        this._renderCctvState(state);
+      });
+    }
+    if (typeof cctvLayer.getUIState === 'function') {
+      this._renderCctvState(cctvLayer.getUIState());
+    }
+    if (this._radioUnsubscribe) {
+      this._radioUnsubscribe();
+      this._radioUnsubscribe = null;
+    }
+    if (typeof radioLayer.subscribe === 'function') {
+      this._radioUnsubscribe = radioLayer.subscribe((state) => {
+        this._renderRadioState(state);
+      });
+    }
+    if (typeof radioLayer.getUIState === 'function') {
+      this._renderRadioState(radioLayer.getUIState());
+    }
+  }
+
   attachDataManager(dataManager) {
     if (this._dataManagerBeforeDestroyUnsubscribe) {
       this._dataManagerBeforeDestroyUnsubscribe();
@@ -4362,6 +4406,11 @@ export class StyleManager {
       this._dataManagerUnsubscribe = this._dataManager.subscribe((change) => {
         if (String(change?.type || '').startsWith('visibility')) {
           this._handleContextLayerChange(change);
+        }
+        // A lazily-loaded layer's implementation just became live: rewire
+        // the panel subscriptions that were no-ops before the module loaded.
+        if (change?.type === 'module-loaded') {
+          this._wireLayerPanelSubscriptions();
         }
         this._loadingFeedbackEvent = change;
         this._updateGlobalLoadingFeedback(performance.now());
@@ -4476,27 +4525,7 @@ export class StyleManager {
       });
     }
     this._syncContextModeButtons();
-    if (this._cctvUnsubscribe) {
-      this._cctvUnsubscribe();
-      this._cctvUnsubscribe = null;
-    }
-    if (typeof cctvLayer.subscribe === 'function') {
-      this._cctvUnsubscribe = cctvLayer.subscribe((state) => {
-        this._renderCctvState(state);
-      });
-    }
-    if (typeof cctvLayer.getUIState === 'function') {
-      this._renderCctvState(cctvLayer.getUIState());
-    }
-    if (this._radioUnsubscribe) {
-      this._radioUnsubscribe();
-      this._radioUnsubscribe = null;
-    }
-    if (typeof radioLayer.subscribe === 'function') {
-      this._radioUnsubscribe = radioLayer.subscribe((state) => {
-        this._renderRadioState(state);
-      });
-    }
+    this._wireLayerPanelSubscriptions();
     if (!this._awarenessSelectedHandler) {
       this._awarenessSelectedHandler = (event) => this._persistAwarenessSelection(event, false);
       this._awarenessClearedHandler = (event) => this._persistAwarenessSelection(event, true);
@@ -4942,7 +4971,10 @@ export class StyleManager {
       let activationIntent = null;
       let terminalIntentOutcome = null;
       try {
-        activationIntent = this._dataManager._setEnabledWithIntent(
+        // Public facade: the manager's exact-intent lane. Calling the
+        // private _setEnabledWithIntent here made a private method part of
+        // the context engine's contract.
+        activationIntent = this._dataManager.setEnabledWithIntent(
           entryLayerId,
           true,
           { notificationToken, ...(signal ? { signal } : {}) },
@@ -4953,7 +4985,7 @@ export class StyleManager {
           intentEpoch: activationIntent.intentEpoch,
         };
         activated = await activationIntent.promise;
-        terminalIntentOutcome = await this._dataManager._waitForVisibilityIntent?.(
+        terminalIntentOutcome = await this._dataManager.waitForVisibilityIntent?.(
           entryLayerId,
           activationIntent.intentEpoch,
         );
@@ -4967,7 +4999,7 @@ export class StyleManager {
         ? this._contextModeReplacementIntent
         : null;
       while (replacementIntent) {
-        const outcome = await this._dataManager._waitForVisibilityIntent?.(
+        const outcome = await this._dataManager.waitForVisibilityIntent?.(
           entryLayerId,
           replacementIntent.intentEpoch,
         );

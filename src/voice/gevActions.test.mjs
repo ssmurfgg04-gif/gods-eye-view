@@ -35,8 +35,9 @@ test('every live basemap is reachable by its own id — no enum value without a 
   assert.equal(normalizeStackId('Esri'), 'esri-imagery');
   assert.equal(normalizeStackId('esri imagery'), 'esri-imagery');
   // And the voice tool's enum must equal the set of live ids — no drift either way.
-  const config = readFileSync(new URL('../../vite.config.js', import.meta.url), 'utf8');
-  const enumMatch = config.match(/enum: \[('photoreal'[^\]]*)\],\s*\n\s*description: 'photoreal = Google 3D/);
+  // (The tool schema moved from vite.config.js to src/voice/realtimeTools.js.)
+  const config = readFileSync(new URL('./realtimeTools.js', import.meta.url), 'utf8');
+  const enumMatch = config.match(/enum: \[('photoreal'[^\]]*)\]/);
   assert.ok(enumMatch, 'set_map_stack enum literal must still be findable');
   const enumIds = enumMatch[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''));
   assert.deepEqual(
@@ -800,8 +801,8 @@ test('generic voice visibility preserves a manager resource-cancellation envelop
     layers: new Map([['rocket-launches', { module: {} }]]),
     getAll: () => [{ id: 'rocket-launches', name: 'Space Missions' }],
     getLayerLifecycleState: () => ({ enabled: false, lifecycleState: 'disabled', uncertain: false }),
-    _setEnabledWithIntent: () => ({ intentEpoch: 7, promise: Promise.resolve(false) }),
-    _waitForVisibilityIntent: async () => ({
+    setEnabledWithIntent: () => ({ intentEpoch: 7, promise: Promise.resolve(false) }),
+    waitForVisibilityIntent: async () => ({
       intentEpoch: 7,
       enabled: true,
       origin: 'voice',
@@ -847,8 +848,8 @@ test('generic voice visibility preserves caller-abort phase before the stale-tur
     layers: new Map([['rocket-launches', { module: {} }]]),
     getAll: () => [{ id: 'rocket-launches', name: 'Space Missions' }],
     getLayerLifecycleState: () => ({ enabled: false, lifecycleState: 'disabled', uncertain: false }),
-    _setEnabledWithIntent: () => ({ intentEpoch: 11, promise: Promise.resolve(false) }),
-    _waitForVisibilityIntent: async () => ({
+    setEnabledWithIntent: () => ({ intentEpoch: 11, promise: Promise.resolve(false) }),
+    waitForVisibilityIntent: async () => ({
       intentEpoch: 11,
       enabled: true,
       origin: 'voice',
@@ -891,8 +892,8 @@ test('generic voice visibility preserves an exact commit when a newer turn arriv
     layers: new Map([['rocket-launches', { module: {} }]]),
     getAll: () => [{ id: 'rocket-launches', name: 'Space Missions' }],
     getLayerLifecycleState: () => ({ enabled: true, lifecycleState: 'enabled', uncertain: false }),
-    _setEnabledWithIntent: () => ({ intentEpoch: 13, promise: Promise.resolve(true) }),
-    _waitForVisibilityIntent: async () => ({
+    setEnabledWithIntent: () => ({ intentEpoch: 13, promise: Promise.resolve(true) }),
+    waitForVisibilityIntent: async () => ({
       intentEpoch: 13,
       enabled: true,
       origin: 'voice',

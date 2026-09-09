@@ -1,0 +1,47 @@
+name: Bundle budget
+
+# Perf gate (P2): the eager boot bundle is a budgeted resource. A PR may not
+# grow the initial chunk by more than 50 kB gzip over the committed baseline
+# (config/bundle-budget.json) without explicitly re-baselining and explaining
+# why. See scripts/check-bundle-budget.mjs for the full contract.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  budget:
+    name: Eager JS budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: '1'
+
+      - name: Build production bundle
+        run: npm run build
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: '1'
+
+      - name: Enforce eager bundle budget
+        run: node scripts/check-bundle-budget.mjs

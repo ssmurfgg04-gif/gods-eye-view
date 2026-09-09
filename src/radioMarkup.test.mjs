@@ -8,18 +8,15 @@ const ui = readFileSync(new URL('./ui.js', import.meta.url), 'utf8');
 const radio = readFileSync(new URL('./data/radio.js', import.meta.url), 'utf8');
 const rocketLaunches = readFileSync(new URL('./data/rocketLaunches.js', import.meta.url), 'utf8');
 const realtime = readFileSync(new URL('./voice/gevRealtime.js', import.meta.url), 'utf8');
-const voice = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+// Session INSTRUCTIONS still live in vite.config.js (with the realtime proxy).
+const voice = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
 
-/** Parse the Realtime tool array out of the Vite config as real data. */
-function realtimeTools() {
-  const start = voice.indexOf('const GEV_REALTIME_TOOLS = [');
-  const end = voice.indexOf('\n];', start);
-  assert.ok(start >= 0 && end > start, 'Realtime tool schema block is missing');
-  const literal = voice.slice(start + 'const GEV_REALTIME_TOOLS = '.length, end + 2);
-  // The block is pure data; evaluating it beats regexing nested schemas.
-  return new Function(`return ${literal};`)();
-}
+// The Realtime tool array is real importable data since the vite.config
+// modularization — importing it beats both regexing and eval'ing source.
+import { GEV_REALTIME_TOOLS } from './voice/realtimeTools.js';
+const realtimeTools = () => GEV_REALTIME_TOOLS;
+const GEV_REALTIME_TOOLS_SOURCE = readFileSync(new URL('./voice/realtimeTools.js', import.meta.url), 'utf8');
 
 test('Realtime schema exposes the authoritative 28-tool inventory', () => {
   const tools = realtimeTools();
@@ -273,10 +270,12 @@ test('panel collapse is presentation-only and Radio exposes explicit voice playb
   const start = ui.lastIndexOf('\n  setPanelCollapsed(panelId');
   const method = ui.slice(start, ui.indexOf('toggleCleanView(forceEnabled)', start));
   assert.doesNotMatch(method, /stopRadio|stopPlayback|setEnabled\('radio'/);
-  assert.match(voice, /'radio-panel'/);
-  assert.match(voice, /'radio'/);
-  assert.match(voice, /name:\s*'control_radio'/);
-  assert.match(voice, /enum:\s*\['enable', 'disable', 'play', 'resume', 'pause', 'stop', 'next', 'previous', 'volume', 'select', 'status'\]/);
+  assert.match(GEV_REALTIME_TOOLS_SOURCE, /'radio-panel'/);
+  // The control_radio tool definition lives in realtimeTools.js; only the
+  // session instructions remain in vite.config.js.
+  assert.match(GEV_REALTIME_TOOLS_SOURCE, /'radio'/);
+  assert.match(GEV_REALTIME_TOOLS_SOURCE, /name:\s*'control_radio'/);
+  assert.match(GEV_REALTIME_TOOLS_SOURCE, /enum:\s*\['enable', 'disable', 'play', 'resume', 'pause', 'stop', 'next', 'previous', 'volume', 'select', 'status'\]/);
   const enableStart = ui.lastIndexOf('\n  _initRadioPanel()');
   const enableMethod = ui.slice(enableStart, ui.indexOf('\n  _renderRadioState(state)', enableStart));
   assert.doesNotMatch(enableMethod, /playSelectedRadio|togglePlayback\(\).*radio-enable/i);

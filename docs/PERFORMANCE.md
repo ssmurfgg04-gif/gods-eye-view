@@ -142,3 +142,79 @@ Use the same controls before attributing a difference to the application:
 
 Use this page as a regression baseline for one known hardware and browser
 configuration, not as a compatibility guarantee.
+
+
+## 2026-09 performance wave — boot, adaptive quality, scheduler, caches
+
+This wave changed WHEN JavaScript loads, how much per-frame GPU work the
+pipeline claims, and how polls coordinate — not the renderer itself. The
+Cesium + vanilla JS architecture is unchanged, as intended.
+
+### Boot bundle (measured on the production build)
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Eager JS (gzip) | 422.6 kB | 198.2 kB |
+| Entry chunk (raw) | 1,369.3 kB | 662.5 kB |
+| Layer modules parsed at boot | 17 of 17 | 0 (lazy per enable) |
+| Voice + annotations + scenes at boot | eager | deferred to post-paint idle |
+
+How: lazy layer registration (`src/data/layerManifest.js` +
+`DataLayerManager.registerLazy`), live-forwarding layer accessors
+(`src/data/layerAccess.js`) so ui.js no longer statically imports every layer,
+a lazy basemap-context import in hud.js (this one import was pulling the whole
+voice graph into the eager chunk), and manualChunks for the geo math family.
+
+The budget is now enforced: `scripts/check-bundle-budget.mjs` fails any PR
+that grows the initial chunk more than 50 kB gzip over the committed baseline
+(`config/bundle-budget.json`).
+
+### Fixed GPU costs made adaptive
+
+- `preserveDrawingBuffer` is now `false` (was `true`). The only Cesium-canvas
+  consumer — voice viewport capture — already reads inside its postRender task
+  via `renderFreshCesiumFrame()`, which is the capture-safe pattern without
+  buffer preservation. All other `toDataURL`/`getImageData` sites use their
+  own offscreen 2D canvases.
+- `msaaSamples` starts at 1× on the low-end profile (else 4×) and steps with
+  the adaptive quality tier (`src/quality/adaptiveQuality.js`): FPS sampled
+  from `scene.postRender` timestamps, resolution 1.0 → 0.85 → 0.75, MSAA
+  4/2/1, with hysteresis (3 bad windows to demote, 6 good to promote) and a
+  5 s cooldown.
+- Low-end profile detection: `?profile=low` / `?profile=high` override;
+  otherwise <6 GB deviceMemory, ≤4 logical cores, or phone UA.
+- Detection label budgets scale by tier (`getLabelBudgetScale()`): the
+  stress scenes below (dense detection, Snow, combined operational) draw
+  fewer labels on constrained hardware instead of dropping frames.
+
+### Polling architecture
+
+Manager-owned refresh intervals moved from one raw `setInterval` per layer to
+a shared scheduler (`src/data/feedScheduler.js`): jittered cadence (no
+enable-time thundering herd), exponential backoff to a cap on failing
+providers with recovery after 2 successes, visibility pause (hidden tabs poll
+for nobody), and no overlapping ticks. Keyless GET feeds (USGS, Launch
+Library 2, GBFS) read through a staleness-aware cache
+(`src/data/feedCache.js`): TTL + ETag revalidation + serve-stale-on-failure,
+so a provider outage presents as stale data, not a blank layer.
+
+### Burst-toggle crash class (PR #141)
+
+Two cooperating fixes, both in the application layer (no head-patch script):
+the idle render governor coalesces same-frame requestRender storms, and
+user-origin toggle clicks serialize through a latest-wins FIFO with bounded
+concurrency and an 80 ms dispatch gap. All 104 DataLayerManager event
+choreography tests pass unchanged in behavior.
+
+### What this wave did NOT change (deliberately)
+
+- No WebGPU, no Wasm SGP4, no binary protocols, no hosted relay — those stay
+  profiling-gated decisions per the roadmap.
+- The entity-vs-primitive audit found flights already on a batched
+  BillboardCollection, detection on a Canvas2D overlay with a label arbiter,
+  and satellites already cursor-amortized: the measured hot paths were
+  already primitive-based; the remaining wins were boot weight, fixed GPU
+  cost, and burst handling.
+- Submarine cables / datacenters still parse to object graphs at activation
+  (the documented heap numbers): the tiled/binary conversion remains the
+  known next milestone for heap reduction.

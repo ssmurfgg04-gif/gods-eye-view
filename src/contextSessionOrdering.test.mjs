@@ -197,13 +197,13 @@ test('right-rail context entry is transactional: activation result gates the mod
     src.indexOf('async _selectContextMode('),
     src.indexOf('async _deactivateContextForLayerChange('),
   );
-  const activation = select.indexOf('activationIntent = this._dataManager._setEnabledWithIntent(');
+  const activation = select.indexOf('activationIntent = this._dataManager.setEnabledWithIntent(');
   assert.ok(activation > 0, 'activation result captured');
   const failureBlock = select.slice(activation);
   assert.match(failureBlock, /activated = await activationIntent\.promise/);
   assert.match(failureBlock, /catch \(error\) \{\s*activationError = error;/);
   assert.match(failureBlock, /_contextModeReplacementIntent\?\.generation === generation/);
-  assert.match(failureBlock, /await this\._dataManager\._waitForVisibilityIntent\?\.\(/);
+  assert.match(failureBlock, /await this\._dataManager\.waitForVisibilityIntent\?\./);
   assert.match(failureBlock, /outcome\?\.intentEpoch === replacementIntent\.intentEpoch[\s\S]*?outcome\.succeeded === true/);
   assert.match(failureBlock, /outcome\?\.cancellationReason === 'superseded'[\s\S]*?outcome\.successorEnabled === true[\s\S]*?outcome\.successorIntentEpoch > replacementIntent\.intentEpoch/);
   assert.match(failureBlock, /activationError \|\| activated === false \|\| !this\._dataManager\.isEnabled\(entryLayerId\)/);

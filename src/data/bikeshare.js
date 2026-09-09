@@ -19,6 +19,7 @@ import {
   setOverlayEntries,
   setOverlaySourceVisible,
 } from '../overlays/worldOverlay.js';
+import { fetchWithCache } from './feedCache.js';
 
 export const BIKESHARE_SELECTED_OVERLAY_SOURCE_ID = 'bikeshare-selected';
 export const BIKESHARE_SELECTED_OVERLAY_SOURCE_OPTIONS = Object.freeze({
@@ -772,22 +773,25 @@ function parseStationStatus(payload) {
  * @returns {Promise<Object>} Parsed JSON payload.
  * @throws {Error} On non-OK HTTP status or malformed JSON.
  */
-async function fetchGbfsJson(upstreamUrl, { signal } = {}) {
-  const response = await fetch(toProxyUrl(upstreamUrl), {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
+async function fetchGbfsJson(upstreamUrl, { signal, allowStale = false } = {}) {
+  // Serve-stale feed cache (perf): within TTL the cached GBFS document
+  // answers directly; on a network/upstream failure the last good document
+  // (marked stale) resolves instead of throwing when `allowStale` permits
+  // it — a provider hiccup reads as old data, not a blank station field.
+  // The 30s TTL matches the feed's own refresh guidance.
+  const result = await fetchWithCache(toProxyUrl(upstreamUrl), {
+    ttlMs: 30_000,
+    maxStaleMs: 5 * 60_000,
     signal,
   });
-
-  if (!response.ok) {
-    throw new Error(`GBFS HTTP ${response.status}`);
-  }
-
-  const payload = await response.json();
-  if (!payload || typeof payload !== 'object') {
+  if (result.ok || (result.stale && allowStale)) {
+    const payload = result.json;
+    if (payload && typeof payload === 'object') {
+      return allowStale && result.stale ? { ...payload, __gevStale: true } : payload;
+    }
     throw new Error('Malformed GBFS payload');
   }
-  return payload;
+  throw new Error(`GBFS HTTP ${result.status}`);
 }
 
 /**

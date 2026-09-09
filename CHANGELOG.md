@@ -1,5 +1,90 @@
 # Changelog
 
+## [Unreleased] — Performance & hardening wave ("stop the browser crashing")
+
+One focused pass over boot cost, render-cost adaptivity, polling architecture,
+feed resilience, and the crash class reported in PR #141. **No features were
+removed** — every change is a pure performance, robustness, or boundary fix.
+
+### Boot & bundle (P0)
+- **Lazy layer registration** (`src/data/layerManifest.js`,
+  `DataLayerManager.registerLazy`): the 17 layer implementations are no longer
+  statically imported at boot; each loads on first enable/restore. Eager JS
+  dropped from ~423 kB to ~198 kB gzip (−53%), entry chunk 1,369 kB → 662 kB.
+- **Deferred voice/annotations/scenes subsystem**: the OpenAI Realtime stack,
+  annotation engine, and scene director stream in after first paint (idle) or
+  first interaction instead of competing with boot.
+- **Layer accessors** (`src/data/layerAccess.js`): ui.js calls into layers
+  through live-forwarding proxies, so no layer module is statically reachable
+  from the boot graph (`hud.js` basemap context import made lazy for the same
+  reason).
+- **manualChunks**: the geo math family (satellite.js/pbf/vector-tile/mgrs)
+  splits into its own long-lived chunk; `egm96` deliberately stays lazy.
+- **Bundle budget gate**: `scripts/check-bundle-budget.mjs` +
+  `.github/workflows/bundle-budget.yml` fail a PR that grows the initial chunk
+  more than 50 kB gzip over `config/bundle-budget.json`.
+
+### Render cost (P0)
+- **`preserveDrawingBuffer: false`** (was `true`): the only Cesium-canvas
+  consumer (voice viewport capture) already reads inside its postRender task,
+  which is the capture-safe pattern; every other capture site uses its own
+  offscreen canvas. Removes the forced extra buffer copy on every frame.
+- **Adaptive quality** (`src/quality/adaptiveQuality.js`): FPS-sampled
+  resolution/MSAA tiering (1.0/4× → 0.85/2× → 0.75/1×) with hysteresis and
+  cooldowns, driven by `scene.postRender` timestamps.
+- **Low-end profile**: `?profile=low`, `<6 GB deviceMemory`, ≤4 cores, or
+  phone UA starts at the reduced tier; detection/label budgets scale down via
+  `getLabelBudgetScale()` (the PERFORMANCE.md stress scenes showed label churn
+  as the top FPS cost).
+
+### Crash & burst fixes (PR #141)
+- **Render-request coalescer** in the idle render governor: the first request
+  in a frame forwards synchronously, same-frame repeats collapse into one
+  deferred flush — a toggle burst costs at most two scene requests per frame
+  instead of dozens.
+- **User-toggle burst queue** (`_queueUserToggle`): rapid multi-row toggle
+  sweeps dispatch with latest-wins dedup, bounded concurrency, and an 80 ms
+  gap. Programmatic/voice/restore flows keep their exact direct paths (all 104
+  manager choreography tests unchanged in behavior, updated only for the
+  interval→feed-job field rename).
+
+### Polling & feeds (P1)
+- **Shared feed scheduler** (`src/data/feedScheduler.js`): manager-owned
+  periodic refreshes now run with jittered cadence (no enable-time thundering
+  herd), exponential backoff on failing providers, visibility pause, and
+  no-overlap ticks — replacing one raw `setInterval` per layer.
+- **Staleness-aware feed cache** (`src/data/feedCache.js`): TTL + ETag
+  revalidation + serve-stale-on-failure for keyless GET feeds. Wired into
+  Earthquakes, Space Missions (Launch Library 2), and GBFS Bikeshare; Radio
+  already had proxy-level stale semantics. A provider outage now reads as
+  "slightly old data" instead of a blank layer.
+- **PR #198 (earthquakes)**: snapshots are fully validated (coordinates,
+  magnitude, ranges) BEFORE replacing the live entity set — a malformed
+  feature can no longer blank the layer mid-replace.
+- **PR #180 (GBFS proxy)**: upstream redirects are refused outright (allowlist
+  bypass closed) and the 5 MB body cap is enforced while streaming, not only
+  after buffering.
+
+### Boundaries & hygiene (P1/P2)
+- **Public manager facades**: `setEnabledWithIntent`, `waitForVisibilityIntent`,
+  `requestPanelRefresh`, `consumePanelRefreshPendingOnVisible` replace every
+  cross-module private-field reach (main.js, ui.js, gevActions.js). An ESLint
+  `no-restricted-syntax` rule blocks new reach-throughs.
+- **GEV_REALTIME_TOOLS extracted** to `src/voice/realtimeTools.js` (620 lines
+  of pure schema data out of vite.config.js; also smoke-tested in CI).
+- **LAN share session token** (SECURITY): `/api/*` gated behind a per-boot
+  token when bound to the LAN; loopback unchanged; documented in SECURITY.md.
+- **Fast PR gate**: `scripts/smoke-pr-gate.mjs` (module loads, tool schema
+  validation, manifest/registry match, manager lifecycle round-trip) + ESLint
+  (flat config) + dependency-cruiser boundary rules, wired into ci.yml.
+- **New unit tests**: feedScheduler, feedCache, layerAccess, layerManifest,
+  adaptiveQuality (29 tests).
+
+### Verified
+- `npm test` full suite, `npm run lint` (0 errors), `depcruise` (0 violations),
+  smoke gate (4/4), `npm run build` + bundle budget gate PASS.
+
+
 This changelog records public product changes. For the authoritative description
 of current runtime behavior, see [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md).
 

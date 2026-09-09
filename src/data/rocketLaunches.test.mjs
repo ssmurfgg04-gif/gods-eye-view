@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
+import { _resetFeedCacheForTest } from './feedCache.js';
 import assert from 'node:assert/strict';
 import * as Cesium from 'cesium';
 import { gstime } from 'satellite.js';
@@ -63,6 +64,12 @@ import {
 
 const NOW = new Date('2026-07-27T00:00:00Z');
 
+
+// Feed-cache isolation: each test mocks its own upstream, so the module-level
+// TTL cache must not leak responses between tests.
+beforeEach(() => {
+  _resetFeedCacheForTest();
+});
 test('mission anchors are hidden behind Earth and restored on the facing hemisphere', () => {
   const camera = Cesium.Cartesian3.fromDegrees(-75, 20, 18000000);
   const front = Cesium.Cartesian3.fromDegrees(-75, 20);
@@ -1129,6 +1136,10 @@ test('real mission build, select, refresh, deselect, disable, and destroy paths 
     );
 
     launchName = 'Mission Refresh | Gauntlet Payload';
+    // The feed cache legitimately collapses same-TTL polls (ttlMs < the
+    // 300 s cadence); this refresh simulates a NEW poll cycle, so expire the
+    // cache to let the mocked upstream change through.
+    _resetFeedCacheForTest();
     await rocketLaunchesLayer.update();
     assert.ok(dataSources[0].entities.values.every((entity) => entity.label === undefined));
     const refreshPublication = hostCalls.findLast(([type, sourceId]) => (

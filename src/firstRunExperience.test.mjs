@@ -649,21 +649,25 @@ test('the DISPLAY rail starts collapsed on a first run, and a stored choice wins
 // ── Voice: instruction-only, tool schema byte-unchanged ─────────────────────
 
 test('the voice TOOL SCHEMA is byte-identical to main — the mission mapping is instructions only', () => {
+  // The tool schema lives in src/voice/realtimeTools.js since the
+  // vite.config modularization; the NAMED VIEWS instructions below remain
+  // in vite.config.js with the realtime session proxy.
+  const toolsSource = fs.readFileSync(new URL('../src/voice/realtimeTools.js', import.meta.url), 'utf8');
   const src = fs.readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
-  const start = src.indexOf('const GEV_REALTIME_TOOLS = [');
+  const start = toolsSource.indexOf('export const GEV_REALTIME_TOOLS = [');
   assert.ok(start > 0, 'GEV_REALTIME_TOOLS must still be a single literal array');
-  const end = src.indexOf('\n];\n', start);
-  const block = src.slice(start, end + 4);
+  const end = toolsSource.lastIndexOf('\n];');
+  const block = toolsSource.slice(start, end + 3);
 
   // Re-pinned 2026-08-28: the Provider Settings / Esri release DELIBERATELY
   // extends set_map_stack's enum with 'esri-imagery' (a real new basemap —
   // exactly the kind of schema change this pin exists to make loud). The
   // guarded claim is unchanged: first-run missions ride existing tools, and
   // any NEW drift from this recorded schema still fails here.
-  assert.equal(block.length, 31189, 'tool schema byte length drifted from the pinned release schema');
+  assert.equal(block.length, 31195, 'tool schema byte length drifted from the pinned release schema');
   assert.equal(
     crypto.createHash('sha256').update(block).digest('hex'),
-    '73aaabdb169a5478893d28688f327a21edd32ed3ec16fc6287bd944ed77beecf',
+    'ff601ef9137e9de4ee50e44194176a92771e73a047a4367550274447ec669aa3',
     'the first-run missions must ride EXISTING tools: no schema edit, no cache bust',
   );
 
@@ -688,7 +692,7 @@ test('the voice TOOL SCHEMA is byte-identical to main — the mission mapping is
 });
 
 test('every layer a mission drives is already in the shipped set_layer_visibility enum', () => {
-  const src = fs.readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../src/voice/realtimeTools.js', import.meta.url), 'utf8');
   const tool = src.slice(src.indexOf("name: 'set_layer_visibility'"), src.indexOf("name: 'show_data_layers_menu'"));
   const missionLayerIds = Object.values(FIRST_RUN_MISSIONS).flatMap((mission) => mission.layerIds || []);
   assert.ok(missionLayerIds.length > 0);

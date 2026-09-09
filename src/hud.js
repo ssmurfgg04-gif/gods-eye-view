@@ -18,7 +18,6 @@ import { forward as toMGRS } from 'mgrs';
 import { CITY_POIS } from './locations.js';
 import { composeLocalityTag } from './hudLocality.js';
 import { ellipsoidalToMslDisplayM, ensureGeoidReady, geoidHeight } from './data/geoid.js';
-import { getBasemapLabelContext } from './voice/gevActions.js';
 import { isHudSummaryUnconfigured } from './hudSummaryResponse.js';
 
 /** Color palettes keyed by shader mode; applied as CSS custom properties. */
@@ -700,6 +699,12 @@ export class IntelHUD {
   }
 
   async _summaryContext() {
+    // Lazy import (perf): the basemap context lives in the voice tooling
+    // module, which also statically imports several layer implementations.
+    // Importing it here eagerly pulled that whole graph into the boot chunk.
+    // The voice subsystem loads after first paint regardless, so this
+    // dynamic import is typically an already-warm module by first use.
+    const { getBasemapLabelContext } = await import('./voice/gevActions.js');
     const labels = await getBasemapLabelContext(this.viewer);
     const enabledLayers = this._dataManager?.getAll?.()
       ?.filter((layer) => layer.enabled)

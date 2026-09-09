@@ -13,6 +13,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast PR gate (perf P2): module-graph smoke, voice tool schema, lazy
+  # manifest/registry match, manager lifecycle round-trip, lint errors, and
+  # module-boundary rules. Minutes-cheap on every PR; the deep QA harnesses
+  # below remain the release gates.
+  fast-gate:
+    name: Fast PR gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Smoke PR gate (module loads, tool schema, manifest match)
+        run: node scripts/smoke-pr-gate.mjs
+
+      - name: Lint (errors gate PRs; legacy warnings tracked separately)
+        run: npm run lint
+
+      - name: Module boundary rules (dependency-cruiser)
+        run: npx depcruise src --config depcruise.config.cjs --output-type err
+
   verify:
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest

@@ -11,6 +11,7 @@ import {
   setOverlaySourceVisible,
 } from '../overlays/worldOverlay.js';
 import { holdContinuousRender, releaseContinuousRender } from '../renderGovernor.js';
+import { fetchWithCache } from './feedCache.js';
 
 const WINDOW_DAYS = 30;
 const API_URL = '/api/launches';
@@ -3342,9 +3343,16 @@ async function restoreSatelliteDependency() {
 async function performMissionUpdate(token) {
   try {
     ensureActiveTleLookup(token);
-    const response = await fetch(API_URL);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const launches = normalizeRocketLaunches(await response.json());
+    // Serve-stale feed cache (perf): a Launch Library 2 outage serves the
+    // last good mission set (marked stale) instead of blanking the layer.
+    const result = await fetchWithCache(API_URL, {
+      // TTL deliberately below the 300 s poll cadence so every poll
+      // revalidates upstream (the cache serves stale ONLY on failure).
+      ttlMs: 90_000,
+      maxStaleMs: 30 * 60_000,
+    });
+    if (!result.ok && !result.stale) throw new Error(`HTTP ${result.status}`);
+    const launches = normalizeRocketLaunches(result.json);
     if (!_enabled || token !== _lifecycleToken || !_dataSource) return;
     const activeTleText = _activeTleText;
     if (_replayCameraLaunchId) stopMissionReplay();

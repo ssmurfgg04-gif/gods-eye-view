@@ -39,6 +39,64 @@ const _holds = new Set();
 const _recentRequests = [];
 const RECENT_REQUEST_CAP = 16;
 
+/**
+ * Frame-coalesced burst guard (PR #141 class of crashes): the first
+ * requestRender() within an animation frame forwards synchronously (keeping
+ * the historic single-request semantics, including test observability), while
+ * any number of further requests inside the SAME frame collapse into exactly
+ * one deferred flush on the next animation frame. Rapid multi-layer toggle
+ * bursts — every layer transition, panel refresh, and stats tick fires a
+ * request — therefore cost at most two scene requests per frame instead of
+ * dozens, and Cesium never has to swallow a synchronous request storm.
+ */
+const _coalesce = { framePending: false, frameMark: -1, flushScheduled: false };
+
+function frameMarkNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+function scheduleCoalescedFlush() {
+  if (_coalesce.flushScheduled) return;
+  _coalesce.flushScheduled = true;
+  const flush = () => {
+    _coalesce.flushScheduled = false;
+    _coalesce.framePending = false;
+    if (!_installed || !_viewer?.scene) return;
+    _viewer.scene.requestRender?.();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => {
+      // Defer one more microtask so the rAF callback itself stays cheap.
+      Promise.resolve().then(flush);
+    });
+  } else if (typeof queueMicrotask === 'function') {
+    // Node/test environments: a microtask keeps the flush observable inside
+    // a single awaited turn (setImmediate/setTimeout would race the caller).
+    queueMicrotask(flush);
+  } else {
+    setTimeout(flush, 0);
+  }
+}
+
+function forwardRequest(reason) {
+  if (!_installed || !_viewer?.scene) return;
+  if (_holds.size === 0) {
+    _recentRequests.push({ reason, at: Date.now() });
+    if (_recentRequests.length > RECENT_REQUEST_CAP) _recentRequests.shift();
+  }
+  const now = frameMarkNow();
+  if (_coalesce.framePending && now - _coalesce.frameMark < 16) {
+    // Same-frame repeat: collapse into the deferred flush.
+    scheduleCoalescedFlush();
+    return;
+  }
+  _coalesce.framePending = true;
+  _coalesce.frameMark = now;
+  _viewer.scene.requestRender?.();
+}
+
 function applyMode() {
   if (!_installed || !_viewer?.scene) return;
   const continuous = _holds.size > 0;
@@ -107,12 +165,10 @@ export function releaseContinuousRender(ownerId) {
  * @returns {void}
  */
 export function governorRequestRender(reason = 'unspecified') {
-  if (!_installed || !_viewer?.scene) return;
-  if (_holds.size === 0) {
-    _recentRequests.push({ reason, at: Date.now() });
-    if (_recentRequests.length > RECENT_REQUEST_CAP) _recentRequests.shift();
-  }
-  _viewer.scene.requestRender?.();
+  // Diagnostics are recorded by forwardRequest() — including for the
+  // coalesced (same-frame repeat) case, so burst storms still show up in the
+  // recentRequests trail with their own reasons.
+  forwardRequest(reason);
 }
 
 /**
@@ -134,4 +190,7 @@ export function _resetRenderGovernorForTest() {
   _installed = false;
   _holds.clear();
   _recentRequests.length = 0;
+  _coalesce.framePending = false;
+  _coalesce.frameMark = -1;
+  _coalesce.flushScheduled = false;
 }

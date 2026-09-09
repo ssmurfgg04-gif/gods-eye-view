@@ -342,11 +342,14 @@ export function createGevActionRunner({ viewer, styleManager, dataManager, scene
       let changeError = null;
       let intentOutcome = null;
       try {
-        if (typeof dataManager._setEnabledWithIntent === 'function') {
-          const intent = dataManager._setEnabledWithIntent(layerId, enabled, changeOptions);
+        // Public intent facade: the exact-epoch handle that lets this
+        // runner adopt or veto in-flight transitions without reaching into
+        // the manager's private lane.
+        if (typeof dataManager.setEnabledWithIntent === 'function') {
+          const intent = dataManager.setEnabledWithIntent(layerId, enabled, changeOptions);
           changed = await intent.promise;
           if (Number.isInteger(intent.intentEpoch)) {
-            intentOutcome = await dataManager._waitForVisibilityIntent?.(layerId, intent.intentEpoch);
+            intentOutcome = await dataManager.waitForVisibilityIntent?.(layerId, intent.intentEpoch);
           }
         } else {
           changed = await dataManager.setEnabled(layerId, enabled, changeOptions);
@@ -1360,11 +1363,11 @@ export async function controlRadio(viewer, dataManager, args = {}, options = {})
     if (options.signal) enableOptions.signal = options.signal;
     let result = false;
     try {
-      if (typeof dataManager._setEnabledWithIntent === 'function') {
-        const intent = dataManager._setEnabledWithIntent('radio', shouldEnable, enableOptions);
+      if (typeof dataManager.setEnabledWithIntent === 'function') {
+        const intent = dataManager.setEnabledWithIntent('radio', shouldEnable, enableOptions);
         result = await intent.promise;
         if (Number.isInteger(intent.intentEpoch)) {
-          lastIntentOutcome = await dataManager._waitForVisibilityIntent?.('radio', intent.intentEpoch);
+          lastIntentOutcome = await dataManager.waitForVisibilityIntent?.('radio', intent.intentEpoch);
         }
       } else {
         result = await dataManager.setEnabled('radio', shouldEnable, enableOptions);

@@ -2,7 +2,7 @@
   "name": "gods-eye-view",
   "private": true,
   "version": "0.1.1",
-  "description": "A real-time intelligence console for planet Earth — photorealistic 3D globe, live aircraft/ships/satellites/earthquakes/CCTV, and hands-free voice control. Runs in a browser.",
+  "description": "A real-time intelligence console for planet Earth \u2014 photorealistic 3D globe, live aircraft/ships/satellites/earthquakes/CCTV, and hands-free voice control. Runs in a browser.",
   "type": "module",
   "license": "MIT",
   "author": "Bilawal Sidhu",
@@ -40,7 +40,13 @@
     "preview": "vite preview",
     "test": "node scripts/run-unit-tests.mjs",
     "test:track": "node scripts/track-regression.mjs",
-    "qa:map-source-tray": "node scripts/qa-map-source-tray.mjs"
+    "qa:map-source-tray": "node scripts/qa-map-source-tray.mjs",
+    "test:fast": "node scripts/smoke-pr-gate.mjs",
+    "budget": "vite build && node scripts/check-bundle-budget.mjs",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "depcruise": "depcruise src --config depcruise.config.cjs",
+    "lint:scripts": "eslint scripts"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
@@ -51,6 +57,9 @@
     "satellite.js": "^6.0.2"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "dependency-cruiser": "^16.10.4",
+    "eslint": "^9.39.5",
     "puppeteer": "^24.37.5",
     "sharp": "^0.34.5",
     "vite": "^6.0.0",

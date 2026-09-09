@@ -1,4 +1,5 @@
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
+import { _resetFeedCacheForTest } from './feedCache.js';
 import assert from 'node:assert/strict';
 import * as Cesium from 'cesium';
 import {
@@ -26,6 +27,12 @@ function makeRecord() {
   };
 }
 
+
+// Feed-cache isolation: each test mocks its own upstream, so the module-level
+// TTL cache must not leak responses between tests.
+beforeEach(() => {
+  _resetFeedCacheForTest();
+});
 test('selected bikeshare entry preserves source copy and protected-lane policy', () => {
   const record = makeRecord();
   const entry = createBikeshareSelectedOverlayEntry('austin-capmetro:3790', record);
