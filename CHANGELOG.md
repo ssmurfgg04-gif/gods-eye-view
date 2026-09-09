@@ -1,5 +1,60 @@
 # Changelog
 
+## [Unreleased] — MILLION-X wave 2: event bus, provenance, timeline, relevance, feed health
+
+Five architecture primitives ("what would you build with 1000×?"), each
+independently useful, wired into the earthquakes layer as the reference
+adopter. No behavior removed; the eager bundle grew only 1.4 kB gzip
+(feedHealth via the scheduler) — everything else loads lazily.
+
+### Event bus — synchronous distribution spine (`src/core/eventBus.js`)
+- Typed pub/sub with exact/prefix-wildcard/RegExp channel matching and
+  synchronous fan-out (microsecond propagation, no batching delay).
+- Bounded per-channel replay buffers with burst coalescing; late-loading
+  modules subscribe with `{replay: true}` and receive buffered history.
+- Listener isolation: one throwing subscriber never severs the spine.
+- The earthquakes layer publishes `layer:earthquakes:update` snapshot events
+  (count, cohort ids, added/removed/revised, staleness, provenance line).
+
+### Provenance — evidence for every datum (`src/data/provenance.js`)
+- `ProvenanceRecord` (source, fetchedAt vs observedAt, confidence) with
+  append-only revision chains: a USGS magnitude correction (M4.2 → M4.5)
+  becomes a first-class fact, not a silent overwrite.
+- `assessProvenance()` grades records against policy (staleness / confidence /
+  volatility) with verdict priority stale > low-confidence > volatile.
+- WeakMap attachment puts evidence on live entities with zero serialization
+  impact; `getStats()` reports `provenance`, `feedState`, `revisedEvents`.
+
+### Event store — replayable timeline (`src/data/eventStore.js`)
+- Append-only bounded ring of layer events with automatic snapshot
+  compaction (every N deltas) and `stateAt(t)` time-travel folds.
+- The singleton bus→store recorder installs idempotently from any layer's
+  init (`ensureBusRecorderInstalled`) — "rewind the planet" as a primitive.
+- Debug surface: `__godsEyeView.timeline.query()` / `.stateAt()`.
+
+### Relevance — attention budgeting (`src/core/relevance.js`)
+- Scoring = severity power-curve × exponential recency decay (6 h half-life)
+  × decaying interaction boost; budget-constrained top-K selection with
+  stable id tie-breaks.
+- Contract: entries with NO relevance signals fall back to the caller's
+  legacy ordering verbatim — relevance upgrades adopters, never ambushes
+  them (the pinned legacy cohort test passes unchanged).
+- The earthquake label cohort now ranks a fresh M4.9 above a 12 h-old M6.5.
+
+### Feed health — self-healing circuits (`src/data/feedHealth.js`)
+- Per-feed EWMA success rate / latency / stale-share, plus a circuit breaker
+  (closed → open → half-open) with escalating probe cool-downs (capped).
+- The feed scheduler gates every tick on `shouldAttempt()`: an open circuit
+  skips the network call entirely (serve-stale keeps the layer alive), and
+  skips are NOT failures — backoff never double-punishes one outage.
+- Jobs can share a circuit via `healthId`; diagnostics expose circuit state
+  per job (`getFeedSchedulerDiagnostics().jobs[].circuit`) and per feed
+  (`__godsEyeView.feedHealth.getFeedHealthSnapshot()`).
+
+### Debug facade
+- `__godsEyeView.bus` / `.timeline` / `.feedHealth` — lazy dynamic-import
+  getters, zero eager cost, same contract as the deferred subsystem getters.
+
 ## [Unreleased] — Performance & hardening wave ("stop the browser crashing")
 
 One focused pass over boot cost, render-cost adaptivity, polling architecture,

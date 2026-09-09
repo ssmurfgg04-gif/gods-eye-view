@@ -371,6 +371,15 @@ async function init() {
     // loop burning behind a hidden tab. (perf wave 2 fix)
     syncVisibilitySuspension();
 
+    // MILLION-X debug accessors (wave 2): the event bus, timeline store, and
+    // feed-health tracker are reachable from the console WITHOUT costing the
+    // eager graph anything — each getter dynamic-imports its module on first
+    // access and caches the singleton. Reading before the async import lands
+    // yields null (same contract as the deferred subsystem getters above).
+    let _busRef = null;
+    let _timelineRef = null;
+    let _feedHealthRef = null;
+
     window.__godsEyeView = {
       viewer,
       styleManager,
@@ -395,6 +404,32 @@ async function init() {
         return deferredSubsystems.voiceCommands;
       },
       initDeferredSubsystems,
+      // Synchronous pub/sub spine with replay (see src/core/eventBus.js).
+      get bus() {
+        if (_busRef) return _busRef;
+        void import('./core/eventBus.js').then((m) => {
+          _busRef = m.gevEventBus;
+        });
+        return null;
+      },
+      // Replayable layer timeline: __godsEyeView.timeline.query({...}) /
+      // .stateAt(t, {layerId: 'earthquakes'}) (see src/data/eventStore.js).
+      get timeline() {
+        if (_timelineRef) return _timelineRef;
+        void import('./data/eventStore.js').then((m) => {
+          _timelineRef = m.layerEventStore;
+        });
+        return null;
+      },
+      // Per-feed circuit breaker + EWMA health: __godsEyeView.feedHealth
+      // .getFeedHealthSnapshot() (see src/data/feedHealth.js).
+      get feedHealth() {
+        if (_feedHealthRef) return _feedHealthRef;
+        void import('./data/feedHealth.js').then((m) => {
+          _feedHealthRef = m.feedHealth;
+        });
+        return null;
+      },
     };
 
   } catch (error) {

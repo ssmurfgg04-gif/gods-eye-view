@@ -6,6 +6,9 @@ import { _resetFeedCacheForTest } from './feedCache.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as Cesium from 'cesium';
+import { gevEventBus } from '../core/eventBus.js';
+import { ensureBusRecorderInstalled, layerEventStore } from './eventStore.js';
+import { getProvenance } from './provenance.js';
 import {
   EARTHQUAKE_OVERLAY_COHORT_LIMIT,
   EARTHQUAKE_OVERLAY_COLLISION_CAPACITY,
@@ -344,4 +347,220 @@ test('earthquake refresh reports failure and clears it only after a successful r
     globalThis.fetch = originalFetch;
     layer.destroy(viewer);
   }
+});
+
+// ── MILLION-X wave 2: provenance / relevance / bus / timeline integration ────
+// The earthquakes layer is the reference adopter of the four subsystems; these
+// tests pin the wiring, not just the modules in isolation.
+
+const NOW_MS = 1_753_612_400_000; // fixed "now" for deterministic relevance
+function minutesAgo(minutes) {
+  return Date.now() - minutes * 60_000;
+}
+function feature(id, mag, time, lon = -122.4, lat = 37.79, depth = 8.2) {
+  return { id, geometry: { coordinates: [lon, lat, depth] }, properties: { mag, place: `Place ${id}`, time } };
+}
+function minimalViewer() {
+  const dataSources = [];
+  return {
+    dataSources: {
+      add(dataSource) { dataSources.push(dataSource); return dataSource; },
+      remove(dataSource) {
+        const index = dataSources.indexOf(dataSource);
+        if (index >= 0) dataSources.splice(index, 1);
+        return index >= 0;
+      },
+    },
+    dataSourcesRef: dataSources,
+  };
+}
+function mockFetchWith(features) {
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ features }) });
+}
+
+test('a USGS magnitude revision across polls becomes a visible provenance fact', async () => {
+  const originalFetch = globalThis.fetch;
+  const viewer = minimalViewer();
+  const layer = createEarthquakesLayer({
+    overlayHost: { setEntries() {}, setVisible() {}, clearSource() {} },
+  });
+  try {
+    layer.init(viewer);
+    layer.enable(viewer);
+
+    mockFetchWith([feature('us-rev-1', 4.2, minutesAgo(60))]);
+    await layer.update(viewer);
+    assert.equal(layer.getStats().revisedEvents, 0);
+
+    // Poll 2: same event id, magnitude corrected 4.2 → 4.5.
+    _resetFeedCacheForTest();
+    mockFetchWith([feature('us-rev-1', 4.5, minutesAgo(60))]);
+    await layer.update(viewer);
+
+    const stats = layer.getStats();
+    assert.equal(stats.revisedEvents, 1, 'one magnitude revision observed');
+    assert.match(stats.provenance, /USGS/);
+    assert.equal(stats.feedState, 'trusted', 'fresh direct fetch grades trusted');
+    assert.ok(stats.lastUpdate > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    layer.destroy(viewer);
+  }
+});
+
+test('feed-level provenance degrades honestly when the network fails', async () => {
+  const originalFetch = globalThis.fetch;
+  const viewer = minimalViewer();
+  const layer = createEarthquakesLayer({
+    overlayHost: { setEntries() {}, setVisible() {}, clearSource() {} },
+  });
+  try {
+    layer.init(viewer);
+    layer.enable(viewer);
+
+    // Prime with a fresh, good snapshot.
+    mockFetchWith([feature('us-stale-1', 4.0, minutesAgo(1))]);
+    await layer.update(viewer);
+    assert.equal(layer.getStats().stale, false);
+    assert.equal(layer.getStats().feedState, 'trusted');
+
+    // Hard-fail the network: the poll reports the error, and stats KEEP the
+    // last good provenance — honest degradation, not amnesia.
+    _resetFeedCacheForTest();
+    globalThis.fetch = async () => ({ ok: false, status: 503 });
+    assert.equal(await layer.update(viewer), false);
+    assert.equal(layer.getStats().error, 'USGS HTTP 503');
+    assert.equal(layer.getStats().feedState, 'trusted', 'last good provenance persists');
+    assert.match(layer.getStats().provenance, /USGS/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    layer.destroy(viewer);
+  }
+});
+
+test('each successful poll publishes one snapshot event on the bus and into the timeline', async () => {
+  const originalFetch = globalThis.fetch;
+  const viewer = minimalViewer();
+  const layer = createEarthquakesLayer({
+    overlayHost: { setEntries() {}, setVisible() {}, clearSource() {} },
+  });
+  const published = [];
+  const off = gevEventBus.subscribe('layer:earthquakes:update', (payload) => published.push(payload));
+  ensureBusRecorderInstalled(); // idempotent — installs if no earlier test did
+  const timelineBefore = layerEventStore.query({ layerId: 'earthquakes' }).length;
+  try {
+    layer.init(viewer);
+    layer.enable(viewer);
+    mockFetchWith([
+      feature('us-bus-1', 5.1, NOW_MS - 60_000),
+      feature('us-bus-2', 3.2, NOW_MS - 120_000),
+    ]);
+    await layer.update(viewer);
+
+    assert.equal(published.length, 1, 'exactly one event per successful poll');
+    const event = published[0];
+    assert.equal(event.type, 'snapshot');
+    assert.equal(event.layerId, 'earthquakes');
+    assert.equal(event.payload.count, 2);
+    assert.deepEqual(event.payload.ids, ['us-bus-1', 'us-bus-2']);
+    assert.equal(event.payload.meta.added, 2, 'both events are new');
+    assert.equal(event.payload.meta.removed, 0);
+    assert.equal(event.payload.meta.stale, false);
+    assert.match(event.payload.meta.provenance, /USGS/);
+
+    // The singleton bus→store recorder filed it into the replayable timeline.
+    const timelineAfter = layerEventStore.query({ layerId: 'earthquakes' }).length;
+    assert.equal(timelineAfter, timelineBefore + 1);
+    const { state } = layerEventStore.stateAt(Date.now() + 1, { layerId: 'earthquakes' });
+    assert.equal(state.count, 2);
+    assert.deepEqual(state.ids, ['us-bus-1', 'us-bus-2']);
+  } finally {
+    off();
+    globalThis.fetch = originalFetch;
+    layer.destroy(viewer);
+  }
+});
+
+test('poll-to-poll diffs report aged-out and newly-added events in timeline meta', async () => {
+  const originalFetch = globalThis.fetch;
+  const viewer = minimalViewer();
+  const layer = createEarthquakesLayer({
+    overlayHost: { setEntries() {}, setVisible() {}, clearSource() {} },
+  });
+  const published = [];
+  const off = gevEventBus.subscribe('layer:earthquakes:update', (payload) => published.push(payload));
+  try {
+    layer.init(viewer);
+    layer.enable(viewer);
+    mockFetchWith([feature('us-old-1', 4.4, NOW_MS - 7200_000), feature('us-old-2', 4.1, NOW_MS - 5400_000)]);
+    await layer.update(viewer);
+
+    _resetFeedCacheForTest();
+    mockFetchWith([feature('us-old-2', 4.1, NOW_MS - 5400_000), feature('us-new-1', 4.9, NOW_MS - 30_000)]);
+    await layer.update(viewer);
+
+    assert.equal(published.length, 2);
+    const diff = published[1].payload.meta;
+    assert.equal(diff.added, 1, 'us-new-1 appeared');
+    assert.equal(diff.removed, 1, 'us-old-1 aged out');
+    assert.equal(diff.revised, 0);
+  } finally {
+    off();
+    globalThis.fetch = originalFetch;
+    layer.destroy(viewer);
+  }
+});
+
+test('entities carry attached provenance records (WeakMap, no shape change)', async () => {
+  const originalFetch = globalThis.fetch;
+  const viewer = minimalViewer();
+  const layer = createEarthquakesLayer({
+    overlayHost: { setEntries() {}, setVisible() {}, clearSource() {} },
+  });
+  try {
+    layer.init(viewer);
+    layer.enable(viewer);
+    mockFetchWith([feature('us-prov-1', 4.7, NOW_MS - 45_000)]);
+    await layer.update(viewer);
+    const [entity] = viewer.dataSourcesRef[0].entities.values;
+    const record = getProvenance(entity);
+    assert.ok(record, 'evidence rides with the entity');
+    assert.equal(record.subjectId, 'us-prov-1');
+    assert.equal(record.revision, 0);
+    assert.equal(record.source, 'USGS');
+  } finally {
+    globalThis.fetch = originalFetch;
+    layer.destroy(viewer);
+  }
+});
+
+test('relevance-ranked cohort: a fresh M4.9 outranks a 12 h-old M6.5', () => {
+  const position = Cesium.Cartesian3.fromDegrees(-122.4, 37.79);
+  const fresh = createEarthquakeOverlayEntry({ id: 'fresh-m49', position, magnitude: 4.9, accent: '#f00', observedAt: NOW_MS - 60_000 });
+  const stale = createEarthquakeOverlayEntry({ id: 'stale-m65', position, magnitude: 6.5, accent: '#f80', observedAt: NOW_MS - 12 * 3_600_000 });
+  const cohort = selectEarthquakeOverlayCohort([stale, fresh], 2, { now: () => NOW_MS });
+  assert.deepEqual(cohort.map((e) => e.id), ['fresh-m49', 'stale-m65'],
+    'severity × recency — the LIVE console ordering, not raw magnitude');
+});
+
+test('relevance cohort keeps the legacy magnitude ordering when entries carry no signals', () => {
+  // Legacy callers (and the pinned test above) pass priority-only entries:
+  // the relevance path must yield to the original comparator verbatim.
+  const entries = [
+    { id: 'p-lo', priority: 100 },
+    { id: 'p-hi', priority: 900 },
+    { id: 'p-mid', priority: 500 },
+  ];
+  const cohort = selectEarthquakeOverlayCohort(entries, 3, { now: () => NOW_MS });
+  assert.deepEqual(cohort.map((e) => e.id), ['p-hi', 'p-mid', 'p-lo']);
+});
+
+test('a mixed cohort ranks scored entries ahead of unscored ones', () => {
+  const position = Cesium.Cartesian3.fromDegrees(-122.4, 37.79);
+  const scored = createEarthquakeOverlayEntry({ id: 'scored', position, magnitude: 5.0, accent: '#f00', observedAt: NOW_MS - 30_000 });
+  const unscored = { id: 'unscored', priority: 9999 };
+  const cohort = selectEarthquakeOverlayCohort([unscored, scored], 2, { now: () => NOW_MS });
+  // Known relevance (even modest) outranks unknown-but-claimed priority.
+  assert.equal(cohort[0].id, 'scored');
+  assert.equal(cohort.length, 2);
 });

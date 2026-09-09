@@ -25,12 +25,21 @@
  *   due (a slow upstream), the due tick is skipped, not queued. Polls never
  *   pile up behind a slow response.
  * - **Diagnostics** — `getFeedSchedulerDiagnostics()` reports every job's
- *   cadence, backoff multiplier, and last result for the debug console.
+ *   cadence, backoff multiplier, last result, and circuit state for the
+ *   debug console.
+ * - **Circuit breaker** (feed health) — every tick is gated by the shared
+ *   feed-health tracker: while a feed's circuit is OPEN the network call is
+ *   skipped entirely (serve-stale keeps the layer alive), and while a probe
+ *   is due the tick IS the probe. Skips are not failures — the breaker
+ *   already rendered its verdict; backoff must not double-punish.
  *
  * The scheduler is deliberately framework-free and node-testable: it uses
  * `setTimeout` chains (not `setInterval`) so each hop can recompute delay,
- * and it only touches `document` when one exists.
+ * and it only touches `document` when one exists. Health wiring is
+ * constructor-injected so isolated tests can disable or fake it.
  */
+
+import { createFeedHealth, feedHealth } from './feedHealth.js';
 
 /** @constant {number} Fraction of interval used as jitter (±). */
 const JITTER_FRACTION = 0.08;
@@ -55,14 +64,24 @@ const HISTORY_CAP = 8;
  * @property {boolean} [pauseWhenHidden=true] Skip ticks while the tab is hidden.
  * @property {number} [initialDelayMs] Override the jittered first-fire delay.
  * @property {() => void} [onError] Failure hook (layers keep their own chips).
+ * @property {string} [healthId] Feed-health circuit identity. Defaults to
+ *   the job id; pass a shared id to make several jobs share one circuit
+ *   (e.g. a layer's poll + its stats refresh hitting the same provider).
  */
 
 class FeedSchedulerImpl {
-  constructor() {
+  /**
+   * @param {{health?: object|null}} [options] Health tracker consulted
+   *   before/after each tick. Pass `null` to disable (hermetic tests);
+   *   defaults to the module singleton. Inject a `createFeedHealth()`
+   *   instance for isolated breaker tests.
+   */
+  constructor(options = {}) {
     /** @type {Map<string, FeedSchedulerJob & {timer, state}>} */
     this._jobs = new Map();
     this._visibilityListenersInstalled = false;
     this._now = () => Date.now();
+    this._health = options.health === null ? null : (options.health ?? feedHealth);
   }
 
   /** Test seam: inject a clock. */
@@ -173,8 +192,25 @@ class FeedSchedulerImpl {
       this._arm(entry, this._jitter(entry.intervalMs));
       return;
     }
+    // Circuit breaker (feed health): while the feed's circuit is open, the
+    // tick never touches the network — serve-stale in feedCache keeps the
+    // layer visually alive, and the skip is NOT a failure sample (the breaker
+    // already knows; backoff must not double-punish one outage). When the
+    // cool-down elapses the gate flips to half-open and this tick becomes the
+    // single probe.
+    const healthId = entry.healthId ?? entry.id;
+    if (this._health) {
+      const gate = this._health.shouldAttempt(healthId);
+      if (!gate.attempt) {
+        entry.lastResult = 'circuit-open';
+        this._health.noteCircuitSkip(healthId);
+        this._arm(entry, Math.max(gate.retryInMs, this._jitter(entry.intervalMs)));
+        return;
+      }
+    }
     entry.inFlight = true;
     entry.lastTickAt = this._now();
+    const tickStartedAt = this._now();
     let ok = true;
     let error = null;
     try {
@@ -185,6 +221,12 @@ class FeedSchedulerImpl {
       error = thrown;
     } finally {
       entry.inFlight = false;
+    }
+    if (this._health) {
+      this._health.recordResult(healthId, {
+        ok,
+        durationMs: Math.max(0, this._now() - tickStartedAt),
+      });
     }
     entry.lastResult = ok ? 'ok' : (error ? 'error' : 'rejected');
     entry.history.push({ at: this._now(), ok });
@@ -230,6 +272,8 @@ class FeedSchedulerImpl {
         lastTickAt: entry.lastTickAt,
         lastResult: entry.lastResult,
         inFlight: entry.inFlight,
+        healthId: entry.healthId ?? entry.id,
+        circuit: this._health ? this._health.shouldAttempt(entry.healthId ?? entry.id).state : 'off',
       });
     }
     return Object.freeze({ jobs: Object.freeze(jobs) });
@@ -248,7 +292,15 @@ export function cancelFeed(id) {
 export function getFeedSchedulerDiagnostics() {
   return scheduler.getFeedSchedulerDiagnostics();
 }
-/** Test seam: build an isolated scheduler (module singleton stays clean). */
-export function createFeedScheduler() {
-  return new FeedSchedulerImpl();
+/**
+ * Test seam: build an isolated scheduler. Each instance gets a FRESH health
+ * tracker so breaker tests hermetically control the clock, and the module
+ * singletons stay clean. Pass `{health: null}` to disable breaker gating
+ * entirely, or `{health: createFeedHealth({...})}` for a configured one.
+ */
+export function createFeedScheduler(options = {}) {
+  if (options && options.health !== undefined) {
+    return new FeedSchedulerImpl(options);
+  }
+  return new FeedSchedulerImpl({ health: createFeedHealth() });
 }

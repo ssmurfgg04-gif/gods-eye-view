@@ -218,3 +218,46 @@ choreography tests pass unchanged in behavior.
 - Submarine cables / datacenters still parse to object graphs at activation
   (the documented heap numbers): the tiled/binary conversion remains the
   known next milestone for heap reduction.
+
+## 2026-09 MILLION-X wave 2 — bus, provenance, timeline, relevance, feed health
+
+Five architecture primitives shipped in one wave (see CHANGELOG for the full
+contract). Performance-relevant facts, measured on the production build:
+
+### Eager-bundle impact
+
+| Metric | Wave 1 | Wave 2 | Delta |
+| --- | --- | --- | --- |
+| Eager JS (gzip) | 198.9 kB | 200.3 kB | +1.4 kB |
+| Eager total (JS+CSS, gzip) | 231.1 kB | 232.4 kB | +1.3 kB |
+
+The entire delta is `src/data/feedHealth.js` (~1.4 kB gzip) entering the eager
+graph through `manager → feedScheduler → feedHealth` — the breaker must be live
+before the first poll fires. The other four modules are imported only by the
+lazily-loaded earthquakes layer, and the debug facade reaches them via dynamic
+import getters (`__godsEyeView.bus/.timeline/.feedHealth`), so they cost boot
+nothing.
+
+### Runtime cost profile
+
+- **Event bus**: synchronous dispatch is a Set walk (sub-millisecond for the
+  current subscriber count); replay buffers are bounded (32 events/channel)
+  and burst coalescing merges same-key publishes in the buffer. The timeline
+  ring is capacity-bounded (2,048 events) with snapshot compaction every 24
+  deltas per layer, so `stateAt()` stays O(deltas since snapshot).
+- **Provenance**: pure record minting at poll boundaries (once per 60 s for
+  earthquakes), WeakMap attachment on entities — no per-frame cost, no
+  serialization impact, ledger capped at 2,048 identities.
+- **Relevance**: scoring happens once per poll on the label cohort (≤96
+  entries), not per frame; the detection label budget path is untouched.
+- **Feed health**: EWMA updates are O(1) per tick; the breaker gate is a state
+  read. When a circuit is OPEN the scheduler skips the network call — on a
+  dead provider the wave strictly REDUCES work.
+
+### Test coverage
+
+97 new tests (eventBus 18, provenance 15, eventStore 19, relevance 19,
+feedHealth 15, earthquakes integration 8, scheduler breaker 4 — totals per
+module file). Full suite: 2,832 pass / 0 fail / 1 skip (was 2,735 pass).
+Lint: 0 errors, 88 warnings (unchanged from baseline — the wave adds no new
+warnings). depcruise: 0 violations. Smoke gate: 4/4. Budget gate: PASS.
