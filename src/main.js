@@ -66,6 +66,11 @@ async function init() {
 
     loaderStatus.textContent = 'Configuring viewer...';
 
+    // Low-end hardware profile (perf): detected once, applied to the viewer
+    // construction below and published to label/detection budgets via
+    // getLabelBudgetScale(). ?profile=low forces it; ?profile=high disables.
+    const lowEndProfile = detectLowEndProfile();
+
     // A direct Google key provides Google 3D plus GEV place search. Cesium ion
     // can host the same 3D tiles and also powers Bing/world-terrain stacks.
     const cesiumToken = import.meta.env.CESIUM_ION_TOKEN;
@@ -117,11 +122,6 @@ async function init() {
         },
       },
     });
-
-    // Low-end hardware profile (perf): detected once, applied to the viewer
-    // construction above and published to label/detection budgets via
-    // getLabelBudgetScale(). ?profile=low forces it; ?profile=high disables.
-    const lowEndProfile = detectLowEndProfile();
 
     // Adaptive render quality (perf): FPS-sampled resolution/MSAA tiering
     // with hysteresis, plus the low-end starting tier. Installs after the
