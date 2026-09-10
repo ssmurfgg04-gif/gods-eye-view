@@ -20,6 +20,7 @@ The golden rule: **secret-bearing API keys stay on the server side.** The dev/pr
 | `OPENAI_API_KEY` | Server only | Browser fetches a short-lived **ephemeral** Realtime session token from `/api/realtime/token`; the real key never ships |
 | `AISSTREAM_API_KEY` | Server only | Server holds the AISStream websocket; browser polls the same-origin `/api/ais-live` cache |
 | OpenSky OAuth (`OPENSKY_CLIENT_ID/SECRET`) | Server only | Server mints + refreshes the token behind `/api/opensky` |
+| `GOOGLE_MAPS_SERVER_API_KEY` (optional) | Server only | Places / Street View proxies (`streetViewFallback`, nearby-places, text-search) prefer it, falling back to the shared browser key when unset — so one key keeps working, and hosted deployments can split restriction: browser key by HTTP referrer (Tiles + Geocoding), server key by server IP (Places + Street View Static) |
 
 ### Two deliberately client-side keys — restrict them
 

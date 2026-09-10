@@ -31,11 +31,30 @@
  */
 
 let msgpack = null;
-try {
-  msgpack = (await import('msgpack-lite')).default;
-} catch {
-  // MessagePack not available, will use JSON fallback
+let _msgpackPromise = null;
+/**
+ * Load the optional MessagePack codec lazily. Top-level await is
+ * deliberately avoided: it breaks the production build's es2020 target, and
+ * the codec is a progressive enhancement over JSON anyway. Vite code-splits
+ * the dynamic import, so the codec stays out of the initial bundle until the
+ * first feed fetch.
+ * @returns {Promise<object|null>} The codec, or null when unavailable.
+ */
+function ensureMsgpack() {
+  if (msgpack) return Promise.resolve(msgpack);
+  if (!_msgpackPromise) {
+    _msgpackPromise = import('msgpack-lite').then(
+      (mod) => {
+        msgpack = mod?.default ?? mod ?? null;
+        return msgpack;
+      },
+      () => null,
+    );
+  }
+  return _msgpackPromise;
 }
+// Warm the codec without blocking module evaluation.
+void ensureMsgpack();
 
 const DB_NAME = 'gev-feed-cache';
 const DB_VERSION = 1;
@@ -285,6 +304,9 @@ export async function fetchWithCache(url, options = {}) {
 
   const entry = await readEntry(url);
   const now = Date.now();
+  // Codec readiness gates binary decode below; the shared promise resolves
+  // once per session, so steady-state hits pay no extra latency.
+  await ensureMsgpack();
   // Fresh hit without an ETag: answer directly, zero network. (With an ETag
   // we still revalidate — a 304 is one header round-trip and keeps the entry
   // honest; without ETag support upstream, TTL is the only freshness signal

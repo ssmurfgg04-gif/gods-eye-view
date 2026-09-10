@@ -548,6 +548,23 @@ function clientKey(req) {
 }
 
 /**
+ * Server-side Google key for the Places / Street View proxies
+ * (`streetViewFallback`, nearby-places, text-search).
+ *
+ * `GOOGLE_MAPS_SERVER_API_KEY` is opt-in: when unset, the shared
+ * `GOOGLE_MAPS_API_KEY` keeps working unchanged. Splitting lets each key be
+ * restricted in Google Cloud to just what it does — the browser key by HTTP
+ * referrer to Map Tiles + Geocoding, the server key by server IP (never a
+ * referrer; it never reaches the browser) to Places + Street View Static.
+ * @returns {string} The server key, or '' when neither is configured.
+ */
+function googleServerKey() {
+  return String(
+    process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
+  ).trim();
+}
+
+/**
  * Full Content-Security-Policy for the dev and preview servers (replaces the
  * old frame-ancestors-only header).
  *
@@ -4692,9 +4709,9 @@ function cctvProxy() {
     };
   };
 
-  /** Fetch a Google Street View static image as a fallback frame. Requires GOOGLE_MAPS_API_KEY. */
+  /** Fetch a Google Street View static image as a fallback frame. Requires a server Google key. */
   const streetViewFallback = async ({ lat, lon, heading, fov, pitch }) => {
-    const streetViewKey = process.env.GOOGLE_MAPS_API_KEY;
+    const streetViewKey = googleServerKey();
     if (!streetViewKey || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
     try {
       const sv = new URL('https://maps.googleapis.com/maps/api/streetview');
@@ -5550,7 +5567,7 @@ export function googlePlacesContextProxy() {
       // Keyless place context has no provider cost, so it resolves before the
       // paid-endpoint limiter can consume or exhaust quota (mirrors the HUD
       // summary route).
-      const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+      const apiKey = googleServerKey();
       const keyless = keylessGooglePlacesResponse(apiKey);
       if (keyless) {
         res.statusCode = keyless.statusCode;
@@ -5669,7 +5686,7 @@ export function googlePlacesContextProxy() {
       // Keyless place context has no provider cost, so it resolves before the
       // paid-endpoint limiter can consume or exhaust quota (mirrors the HUD
       // summary route).
-      const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+      const apiKey = googleServerKey();
       const keyless = keylessGooglePlacesResponse(apiKey);
       if (keyless) {
         res.statusCode = keyless.statusCode;
