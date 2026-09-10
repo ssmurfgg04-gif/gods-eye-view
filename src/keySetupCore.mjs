@@ -166,6 +166,23 @@ export function parseWindowsUserSid(stdout) {
 }
 
 /**
+ * Reverse-proxy / CDN forwarding header names (lowercase). Shared by the
+ * credential panel gate below and the same-site gate in
+ * `src/localRequestGate.mjs` so the two definitions cannot drift apart.
+ */
+export const PROXY_SIGNAL_HEADERS = Object.freeze([
+  'forwarded',
+  'via',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'cf-connecting-ip',
+  'cf-ray',
+]);
+
+/**
  * The admission gate for the Provider Settings endpoints — pure, exported so
  * every refusal below is pinned by a unit assertion rather than a review note.
  *
@@ -200,8 +217,7 @@ export function admitKeySetupRequest({
   // on this machine, whatever its socket says. Refuse them outright as defense
   // in depth — the shipped tunnel (Pinokio) is force-closed at boot, so these
   // only appear when someone has deliberately fronted the dev server.
-  const PROXY_SIGNALS = ['forwarded', 'via', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-port', 'x-forwarded-proto', 'x-real-ip', 'cf-connecting-ip', 'cf-ray'];
-  if (PROXY_SIGNALS.some((name) => String(proxyHeaders[name] || '').trim() !== '')) {
+  if (PROXY_SIGNAL_HEADERS.some((name) => String(proxyHeaders[name] || '').trim() !== '')) {
     return { ok: false, status: 403, error: 'Provider Settings does not answer proxied requests' };
   }
   // Every sharing signal the launcher recognizes (scripts/pinokio-preflight.mjs)

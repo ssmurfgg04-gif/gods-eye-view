@@ -48,6 +48,7 @@ import { createRequire } from 'node:module';
 import { defineConfig, loadEnv } from 'vite';
 import cesium from 'vite-plugin-cesium';
 import { normalizeRadioCountryInput } from './src/data/radioCountry.js';
+import { admitSameSiteRequest } from './src/localRequestGate.mjs';
 import {
   normalizeRegionalArticles,
   normalizeRegionalPlace,
@@ -544,6 +545,97 @@ function enforceOptInRateLimit(limiter, req, res) {
  */
 function clientKey(req) {
   return String(req.socket?.remoteAddress || 'local');
+}
+
+/**
+ * Full Content-Security-Policy for the dev and preview servers (replaces the
+ * old frame-ancestors-only header).
+ *
+ * - `script-src 'self' 'unsafe-eval'`: Knockout, bundled in
+ *   @cesium/widgets, resolves the global object with `(0, eval)("this")` at
+ *   load time — with `wasm-unsafe-eval` alone the Cesium widget never
+ *   initializes. Inline scripts and foreign origins stay blocked.
+ * - `connect-src` stays broad (`http(s):` + websockets): the app calls
+ *   dozens of provider hosts directly (tiles, Photon, radio streams) and a
+ *   host allowlist here would be a breakage list, not a boundary. The
+ *   server-side SSRF and quota boundaries live in the proxies, not the CSP.
+ * - `img-src`/`media-src` allow https/data/blob for tiles, frames, streams.
+ * - `frame-ancestors 'none'` + `X-Frame-Options: DENY` keep clickjacking
+ *   against the credential panel impossible.
+ */
+const LOCAL_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-eval'",
+  "worker-src 'self' blob:",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",
+  "media-src 'self' blob: https:",
+  "connect-src 'self' http: https: ws: wss:",
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
+/** Response headers applied to everything the dev and preview servers serve. */
+function localSecurityHeaders() {
+  return {
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': LOCAL_CSP,
+  };
+}
+
+/**
+ * Same-site gate for paid-or-writable endpoints. Call after the method check
+ * and before any rate limiter or provider spend: writes a 403 and returns
+ * false when the request is cross-site, proxied, or foreign-Origined.
+ * @param {import('http').IncomingMessage} req
+ * @param {import('http').ServerResponse} res
+ * @returns {boolean} True if the request may proceed; false if a 403 was sent.
+ */
+function admitSameSite(req, res) {
+  const verdict = admitSameSiteRequest({
+    method: req.method,
+    hostHeader: req.headers?.host,
+    origin: req.headers?.origin,
+    secFetchSite: req.headers?.['sec-fetch-site'],
+    proxyHeaders: req.headers || {},
+  });
+  if (verdict.ok) return true;
+  res.statusCode = verdict.status;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ error: verdict.error }));
+  return false;
+}
+
+/**
+ * Hardened host allowlist. Never `true` (which admits DNS-rebinding
+ * hostnames): localhost names, IPv6 loopback, `.local`, this machine's LAN
+ * IPv4 addresses (so the documented `HOST=0.0.0.0` LAN opt-in keeps working
+ * without opening the server to arbitrary Host headers), plus comma-separated
+ * extras from `VITE_ALLOWED_HOSTS`.
+ * @param {object} env Process env snapshot.
+ * @returns {Array<string>} Vite `allowedHosts` value.
+ */
+function resolveAllowedHosts(env) {
+  const hosts = new Set(['localhost', '127.0.0.1', '[::1]', '.local']);
+  try {
+    for (const addresses of Object.values(os.networkInterfaces() || {})) {
+      for (const address of addresses || []) {
+        if (address && address.family === 'IPv4' && !address.internal) {
+          hosts.add(address.address);
+        }
+      }
+    }
+  } catch {
+    // Network enumeration is best-effort; the static names still apply.
+  }
+  for (const extra of String(env.VITE_ALLOWED_HOSTS || '').split(',')) {
+    const name = extra.trim();
+    if (name) hosts.add(name);
+  }
+  return [...hosts];
 }
 
 /** Server-side timeout ceiling (seconds) we allow inside an Overpass QL query. */
@@ -5110,6 +5202,9 @@ export function openAiRealtimeProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed' }));
         return;
       }
+      // Paid-endpoint gate: a hostile page must not spend OpenAI quota
+      // cross-site. Same-origin app traffic and headerless Node QA pass.
+      if (!admitSameSite(req, res)) return;
 
       const apiKey = process.env.OPENAI_API_KEY;
       const keyless = keylessHudSummaryResponse(apiKey);
@@ -5172,6 +5267,9 @@ export function openAiRealtimeProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed' }));
         return;
       }
+      // Writable-endpoint gate: attacker-chosen bytes must never reach the
+      // debug log cross-site. Same-origin app traffic and Node QA pass.
+      if (!admitSameSite(req, res)) return;
 
       try {
         const body = await readRequestBody(req, REALTIME_DEBUG_LOG_MAX_BYTES);
@@ -5197,6 +5295,10 @@ export function openAiRealtimeProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed' }));
         return;
       }
+      // Paid-endpoint gate: a hostile page must not mint Realtime tokens
+      // cross-site (an <img> probe carries no Origin but a cross-site
+      // Sec-Fetch-Site). Same-origin app traffic and Node QA pass.
+      if (!admitSameSite(req, res)) return;
 
       // Opt-in per-IP throttle (GEV_RATELIMIT_OPENAI_PER_MIN). No-op when unset.
       if (!enforceOptInRateLimit(openAiRateLimiter(), req, res)) return;
@@ -5441,6 +5543,9 @@ export function googlePlacesContextProxy() {
         res.end(JSON.stringify({ error: 'Method not allowed', places: [] }));
         return;
       }
+      // Paid-endpoint gate: a hostile page must not spend Google quota
+      // cross-site. Same-origin app traffic and headerless Node QA pass.
+      if (!admitSameSite(req, res)) return;
 
       // Keyless place context has no provider cost, so it resolves before the
       // paid-endpoint limiter can consume or exhaust quota (mirrors the HUD
@@ -7230,7 +7335,6 @@ export default defineConfig(({ mode }) => {
     if (process.env[key] === undefined) process.env[key] = val;
   }
   const env = { ...process.env };
-  const localAllowedHosts = ['localhost', '127.0.0.1', '.local'];
   return {
     plugins: [
       // API gate must wrap the middleware stack BEFORE any /api proxy.
@@ -7260,10 +7364,11 @@ export default defineConfig(({ mode }) => {
     server: {
       host: env.HOST || 'localhost',
       port: parseInt(env.PORT, 10) || 4173,
-      // When binding to all interfaces, allow any host; otherwise restrict to local names
-      allowedHosts: (env.HOST === '0.0.0.0' || env.HOST === '::')
-        ? true
-        : localAllowedHosts,
+      // Never `true` (which would admit DNS-rebinding hostnames): localhost
+      // names plus this machine's LAN IPv4s, so the documented HOST=0.0.0.0
+      // LAN opt-in keeps working while arbitrary Host headers stay refused.
+      // Custom names go in VITE_ALLOWED_HOSTS (comma-separated).
+      allowedHosts: resolveAllowedHosts(env),
       fs: {
         // Pinokio keeps optional credentials in this ignored local file.
         deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/ENVIRONMENT'],
@@ -7275,10 +7380,11 @@ export default defineConfig(({ mode }) => {
       // app issue a perfectly same-origin credential write that passes every
       // Host/Origin check. These headers apply to everything this dev server
       // serves, which is what makes that attack impossible rather than unlikely.
-      headers: {
-        'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "frame-ancestors 'none'",
-      },
+      headers: localSecurityHeaders(),
+    },
+    preview: {
+      port: parseInt(env.PORT, 10) || 4173,
+      headers: localSecurityHeaders(),
     },
     // Expose selected API keys to the browser via import.meta.env.*
     define: {
