@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   fetchWithCache,
   fetchJsonWithCache,
-  clearFeedCache,
   COALESCE_WINDOW_MS,
   _resetFeedCacheForTest,
 } from './feedCache.js';

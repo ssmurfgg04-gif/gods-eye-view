@@ -1446,7 +1446,7 @@ export function isGroundsLikeAsk(target, label, entityKind) {
  */
 const monumentInflight = new Map(); // centerKey → in-flight sweep promise (batch dedup)
 
-async function fetchLocalMonument(lat, lon, query, signal) {
+async function fetchLocalMonument(lat, lon, query, _signal) {
   const centerKey = `${lat.toFixed(2)},${lon.toFixed(2)}`; // ~1 km buckets — grounds monuments share one
   let features = cacheRead(monumentCache, centerKey);
   if (features === undefined) {
