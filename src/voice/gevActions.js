@@ -1268,25 +1268,38 @@ async function resolveRadioLocation(args = {}, coordinates = radioCoordinatePair
   if (known) return known;
   if (!query) return null;
   const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) throw new Error('No Google Maps API key available for Radio location search');
   const controller = new AbortController();
   const cancelFromTurn = () => controller.abort();
   if (options.signal?.aborted) throw radioAbortError();
   options.signal?.addEventListener('abort', cancelFromTurn, { once: true });
   const timer = setTimeout(() => controller.abort(), 6000);
   try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
-    const response = await fetch(url, { signal: controller.signal });
-    const body = await response.json();
+    if (apiKey) {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
+      const response = await fetch(url, { signal: controller.signal });
+      const body = await response.json();
+      if (!radioActionIsCurrent(options)) throw radioAbortError();
+      const result = body.status === 'OK' ? body.results?.[0] : null;
+      if (result?.geometry?.location) {
+        return {
+          lat: result.geometry.location.lat,
+          lon: result.geometry.location.lng,
+          label: result.formatted_address || query,
+          country: '',
+        };
+      }
+      // Empty result (including HTTP-200 REQUEST_DENIED on an unenabled API)
+      // falls through to the keyless path instead of failing the voice turn.
+    }
     if (!radioActionIsCurrent(options)) throw radioAbortError();
-    const result = body.status === 'OK' ? body.results?.[0] : null;
-    if (!result?.geometry?.location) return null;
-    return {
-      lat: result.geometry.location.lat,
-      lon: result.geometry.location.lng,
-      label: result.formatted_address || query,
-      country: '',
-    };
+    const { forwardGeocodeKeyless } = await import('../keylessGeocoder.js');
+    const place = await forwardGeocodeKeyless(query, { signal: controller.signal });
+    if (!radioActionIsCurrent(options)) throw radioAbortError();
+    if (!place) return null;
+    // The composed label still names the country; the country FIELD stays
+    // empty because Photon reports it in the feature's own language, which
+    // the closed country matcher downstream cannot map (and must not filter on).
+    return { lat: place.lat, lon: place.lon, label: place.label || query, country: '' };
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', cancelFromTurn);
@@ -3164,39 +3177,6 @@ function dominantValue(values) {
   };
 }
 
-function summarizeEntity(viewer, entity, { includeProperties = false } = {}) {
-  const now = Cesium.JulianDate.now();
-  if (entity.__gevContextId) {
-    const store = window.__gevContextStore;
-    const record = store?.entities?.get(entity.__gevContextId);
-    if (record) return summarizeContextRecord(record, { includeProperties });
-  }
-  const props = propertyObject(entity);
-  const layerId = entity.__localLayerId || props.layerId || null;
-  const tags = props.tags || {};
-  const label = cleanText(
-    props.name ||
-    tags.name ||
-    tags['name:en'] ||
-    tags.official_name ||
-    tags.operator ||
-    props.operator ||
-    entity.name ||
-    layerTitle(layerId)
-  );
-  const position = entity.__localBaseCartesian || entity.position?.getValue?.(now) || polygonCenter(entity, now);
-  const carto = position ? Cesium.Cartographic.fromCartesian(position) : null;
-  return {
-    id: String(entity.id || ''),
-    name: label || layerTitle(layerId),
-    layerId,
-    layerName: layerTitle(layerId),
-    latitude: carto ? Number(Cesium.Math.toDegrees(carto.latitude).toFixed(6)) : null,
-    longitude: carto ? Number(Cesium.Math.toDegrees(carto.longitude).toFixed(6)) : null,
-    properties: includeProperties ? compactProperties(props) : undefined,
-  };
-}
-
 function summarizeContextRecord(record, { includeProperties = false } = {}) {
   return {
     id: String(record.id || ''),
@@ -3211,29 +3191,9 @@ function summarizeContextRecord(record, { includeProperties = false } = {}) {
   };
 }
 
-function polygonCenter(entity, now) {
-  const hierarchy = entity.polygon?.hierarchy?.getValue?.(now);
-  const positions = hierarchy?.positions;
-  if (!positions?.length) return null;
-  return Cesium.BoundingSphere.fromPoints(positions).center;
-}
 
-function propertyObject(entity) {
-  const raw = entity?.properties?.getValue?.(Cesium.JulianDate.now()) || {};
-  return unwrapProperties(raw);
-}
 
-function unwrapProperties(value) {
-  if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(unwrapProperties);
-  const out = {};
-  for (const [key, entry] of Object.entries(value)) {
-    out[key] = entry && typeof entry.getValue === 'function'
-      ? unwrapProperties(entry.getValue(Cesium.JulianDate.now()))
-      : unwrapProperties(entry);
-  }
-  return out;
-}
+
 
 function compactProperties(props) {
   const preferredKeys = [

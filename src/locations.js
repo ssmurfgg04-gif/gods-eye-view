@@ -1,6 +1,27 @@
 import * as Cesium from 'cesium';
 import { viewportBias, placesNearViewRecovery } from './annotations/annotationResolver.js';
-import { forwardGeocodeFallback } from './geocodeFallback.js';
+import { forwardGeocodeKeyless } from './keylessGeocoder.js';
+
+/**
+ * View-centre proximity bias for the keyless fallback, from the camera
+ * nadir. Google's `bounds` prefers in-view results; Photon takes `lat`/`lon`
+ * proximity instead. Null-safe: teardown or a missing camera means global
+ * search.
+ * @param {object} viewer - Cesium viewer (or test double).
+ * @returns {{lat:number, lon:number}|null}
+ */
+function viewCenterForBias(viewer) {
+  try {
+    const carto = viewer?.camera?.positionCartographic;
+    if (!carto) return null;
+    const lat = Cesium.Math.toDegrees(carto.latitude);
+    const lon = Cesium.Math.toDegrees(carto.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return { lat, lon };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Points of Interest per city.
@@ -360,16 +381,20 @@ export async function searchAndFlyTo(viewer, query, options = {}) {
   let viewport;
 
   if (!apiKey) {
-    // Keyless install: the free Nominatim fallback resolves the point directly
-    // (no viewport bias, no place box — see src/geocodeFallback.js). Without a
-    // Places key there is no near-view recovery either, so a miss is final.
-    const fallback = await forwardGeocodeFallback(query).catch(() => null);
-    if (!fallback) throw new Error('No Google Maps API key available for geocoding');
+    // Keyless install: the free Photon fallback resolves the name into the
+    // same shape the Google path produces (types + bounds included), biased
+    // to the view centre. Without a Places key there is no near-view
+    // recovery either, so a miss is final — reported as not-found (null),
+    // which the search box already renders as its miss branch.
+    const fallback = await forwardGeocodeKeyless(query, {
+      near: viewCenterForBias(viewer),
+    }).catch(() => null);
+    if (!fallback) return null;
     lat = fallback.lat;
     lng = fallback.lon;
     label = fallback.label || query;
-    types = [];
-    viewport = null;
+    types = fallback.types || [];
+    viewport = fallback.viewport || null;
   } else {
     // Viewport-biased geocode — the same bias annotationResolver's geocodePlace uses:
     // "Sixth Street" spoken over Austin must prefer the Sixth Street on screen, not a
@@ -399,14 +424,18 @@ export async function searchAndFlyTo(viewer, query, options = {}) {
       viewport = placesViewportToBounds(recovered.viewport) || viewport;
     } else if (!result) {
       // Google missed and Places could not recover: one free-fallback attempt
-      // before reporting not-found (covers quota outages on keyed installs).
-      const fallback = await forwardGeocodeFallback(query).catch(() => null);
+      // before reporting not-found. An unenabled Geocoding API answers HTTP
+      // 200 with REQUEST_DENIED — the empty result (not an exception) is what
+      // detects it — so quota outages land here too.
+      const fallback = await forwardGeocodeKeyless(query, {
+        near: viewCenterForBias(viewer),
+      }).catch(() => null);
       if (!fallback) return null;
       lat = fallback.lat;
       lng = fallback.lon;
       label = fallback.label || query;
-      types = [];
-      viewport = null;
+      types = fallback.types || [];
+      viewport = fallback.viewport || null;
     }
   }
 

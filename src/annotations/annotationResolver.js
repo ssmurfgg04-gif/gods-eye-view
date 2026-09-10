@@ -2,7 +2,7 @@ import * as Cesium from 'cesium';
 import { lookupNeighborhoodRing } from '../data/neighborhoodPolygons.js';
 import { lookupNaturalRegionOutline, findNaturalRegion } from '../data/naturalEarthRegions.js';
 import { registerDynamicCredit, NATURAL_EARTH_CREDIT } from '../data/dataCredits.js';
-import { GEOCODE_FALLBACK_CREDIT } from '../geocodeFallback.js';
+import { KEYLESS_GEOCODER_CREDIT } from '../keylessGeocoder.js';
 import { isPickedWorldPosition } from '../data/scenePick.js';
 
 /**
@@ -141,7 +141,7 @@ export async function resolveAnnotationTarget({
         }
       }
       if (source !== 'places') {
-        const geocoded = await geocodePlace(query, viewportBias(viewer), signal, viewer);
+        const geocoded = await geocodePlace(query, viewportBias(viewer), signal, viewer, center);
         if (geocoded) {
           lat = geocoded.lat;
           lon = geocoded.lon;
@@ -603,18 +603,22 @@ function ringAreaM2(ring) {
  * Forward-geocode a place name via Google Geocoding, biased to the current
  * viewport so "the marina" resolves near where the user is looking.
  *
- * Keyless fallback: without a Google key — or when Google misses — the query
- * falls through to the free Nominatim path (`src/geocodeFallback.js`, ODbL).
- * The fallback is unbiased global search with no place viewport, so it lands
- * on the point, never a framed box; provenance is stamped on the result.
+ * Keyless fallback: without a Google key — or when Google declines — the
+ * query falls through to the free Photon path (`src/keylessGeocoder.js`,
+ * komoot over OSM). Photon normalises into the same place shape (types +
+ * bounds + canonical name), biased by the view centre. An outage is never
+ * memoised as a miss: a not-found is remembered only when every consulted
+ * source actually answered.
  */
-async function geocodePlace(query, biasRect, signal, viewer = null) {
+async function geocodePlace(query, biasRect, signal, viewer = null, center = null) {
   const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
 
   const cacheKey = `${query.toLowerCase()}|${biasRect || ''}`;
   const cached = cacheRead(geocodeCache, cacheKey);
   if (cached !== undefined) return cached;
 
+  // 'hit' | 'miss' (ZERO_RESULTS) | 'transient' | 'unconsulted'
+  let googleVerdict = 'unconsulted';
   if (apiKey) {
     let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
     if (biasRect) url += `&bounds=${biasRect}`;
@@ -627,29 +631,43 @@ async function geocodePlace(query, biasRect, signal, viewer = null) {
         cacheWrite(geocodeCache, cacheKey, place);
         return place;
       }
-      // ZERO_RESULTS is a definitive not-found (cacheable); OVER_QUERY_LIMIT /
-      // REQUEST_DENIED / UNKNOWN_ERROR are transient → don't poison the cache.
-      negCache(geocodeCache, cacheKey, signal, data?.status === 'ZERO_RESULTS');
-      if (data?.status === 'ZERO_RESULTS') return null;
-      // Transient Google failure → try the free fallback below instead of
-      // giving up (a quota outage should not blank annotations).
+      // An unenabled Geocoding API answers HTTP 200 with REQUEST_DENIED — the
+      // empty result (not an exception) is what routes to the fallback.
+      // ZERO_RESULTS is Google's definitive not-found; anything else is
+      // transient and must not poison the key on its own.
+      googleVerdict = data?.status === 'ZERO_RESULTS' ? 'miss' : 'transient';
+      if (signal?.aborted) return null;
+      // Fall through to the free fallback (a quota outage must not blank
+      // annotations); the miss is memoised below only if Photon also answers.
     } catch {
-      negCache(geocodeCache, cacheKey, signal, false); // network/abort — transient
+      googleVerdict = 'transient'; // network/abort — never a verdict
       if (signal?.aborted) return null;
       // Fall through to the free fallback.
     }
   }
 
   try {
-    const { forwardGeocodeFallback } = await import('../geocodeFallback.js');
-    const place = await forwardGeocodeFallback(query, { signal });
+    const { forwardGeocodeKeyless, keylessGeocoderAnswered } = await import('../keylessGeocoder.js');
+    const near = center && Number.isFinite(center.lat) && Number.isFinite(center.lon)
+      ? { lat: center.lat, lon: center.lon }
+      : null;
+    const place = await forwardGeocodeKeyless(query, { signal, near });
     if (place) {
       try {
-        registerDynamicCredit(viewer, GEOCODE_FALLBACK_CREDIT);
+        registerDynamicCredit(viewer, KEYLESS_GEOCODER_CREDIT);
       } catch { /* attribution is best-effort outside a viewer context */ }
       cacheWrite(geocodeCache, cacheKey, place);
       return place;
     }
+    // Miss remembered only when every consulted source answered: Google's
+    // verdict must be a miss (or unconsulted keyless), and Photon must have
+    // answered (not blipped). Anything else stays a retryable miss.
+    const photonDefinitive = keylessGeocoderAnswered(query, near);
+    const definitive = apiKey
+      ? (googleVerdict === 'miss' && photonDefinitive)
+      : photonDefinitive;
+    negCache(geocodeCache, cacheKey, signal, definitive);
+    return null;
   } catch { /* fallback is best-effort; fall through to the negative cache */ }
   negCache(geocodeCache, cacheKey, signal, false);
   return null;
