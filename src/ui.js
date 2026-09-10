@@ -12,7 +12,7 @@ import {
   clampBloomIntensity,
   decodeBloomIntensity,
 } from './bloom.js';
-import { LOCATIONS, CITY_POIS, GLOBE_VIEW, flyToGlobeView, flyToPresetLocation, flyToPOI, searchAndFlyTo } from './locations.js';
+import { CITY_POIS, GLOBE_VIEW, flyToGlobeView, flyToPresetLocation, flyToPOI, searchAndFlyTo } from './locations.js';
 import { locationMiniStatus } from './locationStatus.js';
 import { interruptCameraMotion } from './cameraVerbs.js';
 import {
@@ -90,8 +90,6 @@ import {
   createLoadingFeedbackState,
   createTrafficSyncFeedbackState,
   presentGlobalLoadingStatus,
-  presentGlobalStatusNotice,
-  presentLoadingFeedback,
   reduceLoadingFeedback,
   reduceTrafficSyncFeedback,
 } from './loadingFeedback.js';
@@ -1043,7 +1041,7 @@ class CockpitViewController {
       event.preventDefault();
       event.stopImmediatePropagation();
       if (!this.active && !this.isEntryAllowed()) return;
-      const changed = this.active ? this.exit() : this.enter();
+      this.active ? this.exit() : this.enter();
       return;
     }
   }

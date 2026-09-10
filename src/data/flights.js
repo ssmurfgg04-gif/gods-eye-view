@@ -65,7 +65,7 @@ import { formatFlightLevel } from './detectionDraw.js';
 import { createGroundSnap } from './groundSnap.js';
 import { trackedModelZoomActive } from './trackedModelRegime.js';
 import { geoidSurfaceLastResortM, pickRenderAltitudeM } from './renderAltitude.js';
-import { allocateCorridorCells, cachedGroundFloor, cachedMeshFloor, coarseFloorCoord, corridorFloorCells, displayFloorHeightM, floorAltitudeM, neighborFloorM, stickyFloorCell, warmGroundFloor, resolveGroundFloorCellsBounded, GROUND_FLOOR_LIFT_M } from './groundFloor.js';
+import { allocateCorridorCells, cachedGroundFloor, coarseFloorCoord, corridorFloorCells, displayFloorHeightM, floorAltitudeM, neighborFloorM, stickyFloorCell, warmGroundFloor, resolveGroundFloorCellsBounded, GROUND_FLOOR_LIFT_M } from './groundFloor.js';
 import { sampleMeshFloorCells } from './meshFloorSampler.js';
 import { ensureGeoidReady, geoidHeight } from './geoid.js';
 import {
@@ -4007,7 +4007,7 @@ const flightsLayer = {
    * Also clears any active flight tracking so the camera is released.
    * @param {Cesium.Viewer} viewer
    */
-  disable(viewer) {
+  disable(_viewer) {
     _abortActiveUpdates();
     _cancelPendingTrackingRestore();
     if (_billboardCollection) _billboardCollection.show = false;
@@ -4162,7 +4162,7 @@ const flightsLayer = {
       _lastCoverage = responseCoverage || 'worldwide upstream snapshot';
       const currentIcaos = new Set();
       const acceptedSnapshotIcaos = new Set();
-      const now = Cesium.JulianDate.now();
+      const _now = Cesium.JulianDate.now();
       // Field-test round 3 (2026-07-06, Austin fleet-underground): viewer
       // subpoint + collected floor cells for the viewer-proximate low-contact
       // clamp below — one carto read per poll, one batch warm after the loop.
@@ -4928,7 +4928,7 @@ const flightsLayer = {
       : 50;
     const maxRange = Number.isFinite(range) && range > 0 ? range : Number.POSITIVE_INFINITY;
 
-    const now = Cesium.JulianDate.now();
+    const _now = Cesium.JulianDate.now();
     const nearby = [];
 
     for (const [icao24, bb] of _billboards) {
@@ -5148,7 +5148,7 @@ const flightsLayer = {
     if (!_trackedIcao) return null;
     const described = _describeFlight(_trackedIcao);
     if (!described) return null;
-    const { position, ...rest } = described;
+    const { position: _position, ...rest } = described;
     return rest;
   },
 

@@ -2293,7 +2293,7 @@ function updateRenderVisibility({ force = true } = {}) {
   _horizonScanCount += 1;
   const occluder = horizonOccluder(_viewer.camera);
   let visibilityChanged = false;
-  for (const [id, record] of _renderById) {
+  for (const [_id, record] of _renderById) {
     const matches = stationMatchesRadioCategory(record.station, _filter);
     const visible = matches && occluder.isPointVisible(record.position);
     if (record.entity.show !== visible) visibilityChanged = true;

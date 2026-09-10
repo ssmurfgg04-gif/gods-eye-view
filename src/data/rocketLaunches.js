@@ -2851,7 +2851,7 @@ function addLaunchEntity(launch, activeTleText = _activeTleText) {
     stage.endpoint = landingEndpoint(stage, launch, orbitPath?.[0] || null);
   });
   if (satelliteTrack) _orbitMatches++;
-  const entity = _dataSource.entities.add({
+  _dataSource.entities.add({
     id: `rocket-launch:${launch.id}`,
     position,
     point: {

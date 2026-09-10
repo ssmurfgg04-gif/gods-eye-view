@@ -1,7 +1,6 @@
 import { createGevActionRunner, readLayerLifecycleSummary } from './gevActions.js';
 import {
   DEFAULT_VOICE_TIER,
-  VOICE_COST_LIMITS,
   createVoiceCostTracker,
   formatCostUsd,
   isKnownVoiceTier,

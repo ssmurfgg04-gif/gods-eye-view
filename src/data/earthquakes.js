@@ -236,7 +236,7 @@ let _servingStale = false;
     console.log('[Data:Earthquakes] Initialized');
   },
 
-  enable(viewer) {
+  enable(_viewer) {
     _enabled = true;
     // No continuous-render hold: the discs are static geometry now, so the
     // layer has no per-frame animator to keep the render loop alive for.
@@ -244,7 +244,7 @@ let _servingStale = false;
     overlayHost.setVisible(EARTHQUAKE_OVERLAY_SOURCE_ID, true);
   },
 
-  disable(viewer) {
+  disable(_viewer) {
     _enabled = false;
     _servingStale = false;
     if (_dataSource) _dataSource.show = false;
@@ -252,7 +252,7 @@ let _servingStale = false;
     overlayHost.setVisible(EARTHQUAKE_OVERLAY_SOURCE_ID, false);
   },
 
-  async update(viewer) {
+  async update(_viewer) {
     try {
       // Serve-stale feed cache (perf): within TTL the cached snapshot
       // answers directly; on a USGS/network failure the last good snapshot
@@ -287,7 +287,7 @@ let _servingStale = false;
         if (!feature || !feature.geometry) continue;
         const coordinates = feature.geometry.coordinates;
         if (!Array.isArray(coordinates) || coordinates.length < 2) continue;
-        const [lon, lat, depthKm] = coordinates;
+        const [lon, lat, _depthKm] = coordinates;
         const mag = Number(feature.properties?.mag);
         if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(mag)) continue;
         if (lon < -180 || lon > 180 || lat < -90 || lat > 90) continue;

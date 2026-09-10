@@ -85,7 +85,7 @@ export function createLoadingFeedbackState() {
 }
 
 /** Create a top-center status notice, optionally persistent until explicitly cleared. */
-export function createGlobalStatusNotice(message, nowMs = 0, {
+export function createGlobalStatusNotice(message, _nowMs = 0, {
   state = 'error',
   detail = '',
   persistent = false,

@@ -2710,7 +2710,7 @@ const militaryFlightsLayer = {
    * so clicks do not get intercepted while the layer is off.
    * @param {Cesium.Viewer} viewer - The Cesium viewer instance
    */
-  disable(viewer) {
+  disable(_viewer) {
     _abortActiveUpdates();
     _cancelPendingTrackingRestore();
     if (_billboardCollection) _billboardCollection.show = false;
@@ -3121,7 +3121,7 @@ const militaryFlightsLayer = {
         // If this is the tracked aircraft, update label text
         // (position updates automatically via dead-reckoning CallbackProperty)
         if (isTracked && _trackedEntity) {
-          const info = _flightData.get(icao24);
+          const _info = _flightData.get(icao24);
           _updateTrackedLabelModel(icao24);
         }
       }
@@ -3402,7 +3402,7 @@ const militaryFlightsLayer = {
       : 50;
     const maxRange = Number.isFinite(range) && range > 0 ? range : Number.POSITIVE_INFINITY;
 
-    const now = Cesium.JulianDate.now();
+    const _now = Cesium.JulianDate.now();
     const nearby = [];
 
     for (const [icao24, bb] of _billboards) {
@@ -3733,7 +3733,7 @@ const militaryFlightsLayer = {
     if (!_trackedIcao) return null;
     const described = _describeFlight(_trackedIcao);
     if (!described) return null;
-    const { position, ...rest } = described;
+    const { position: _position, ...rest } = described;
     return rest;
   },
 
