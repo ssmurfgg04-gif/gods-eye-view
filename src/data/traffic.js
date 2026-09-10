@@ -1000,6 +1000,27 @@ function getCameraAltitude() {
 }
 
 /**
+ * Viewport demand multiplier for the scheduler's adaptive polling, derived
+ * from camera altitude. Road geometry is viewport-bounded: at whole-globe
+ * altitude individual roads are subpixel, so polling the road/flow feeds at
+ * full cadence burns quota for pixels nobody can see. Unknown altitude
+ * (Infinity, teardown) reads as FULL demand — the scheduler must only ever
+ * slow down on positive evidence, never on missing evidence.
+ *
+ * Exported pure for unit tests.
+ *
+ * @param {number} altitudeM Camera height in meters.
+ * @returns {number} Demand multiplier in [0, 1].
+ */
+export function viewportDemandForAltitude(altitudeM) {
+  if (!Number.isFinite(altitudeM) || altitudeM <= 0) return 1;
+  if (altitudeM > 5_000_000) return 0.2;
+  if (altitudeM > 1_500_000) return 0.4;
+  if (altitudeM > 400_000) return 0.6;
+  return 1;
+}
+
+/**
  * Compute the current camera view rectangle in degrees.
  * @returns {{south:number, west:number, north:number, east:number}|null}
  *   Bounding box in degrees, or null if the rectangle cannot be computed.
@@ -2460,6 +2481,20 @@ const trafficLayer = {
    *   mode:'live'|'sim', error:string|null, flowCoveragePct:number,
    *   tilesFetched:number}}
    */
+  /**
+   * Viewport demand hook for the shared feed scheduler (`manager.js`
+   * `_layerDemandScale`). Altitude-banded: street-level polls at full
+   * cadence, whole-globe views stretch to 5× the interval. Never throws —
+   * teardown or a missing camera reads as full demand.
+   * @returns {number} Demand multiplier in [0, 1].
+   */
+  getViewportDemand() {
+    try {
+      return viewportDemandForAltitude(getCameraAltitude());
+    } catch {
+      return 1;
+    }
+  },
   getStats() {
     // Outstanding flow work counts as loading: the paint race can leave a
     // TomTom request in flight after the roads have settled, and the shared

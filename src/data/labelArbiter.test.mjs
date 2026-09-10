@@ -215,6 +215,28 @@ test('fading entries remain renderable for the transition window', () => {
   assert.equal(arbiter.renderEntries([], 1501).length, 0);
 });
 
+test('instantFades paints selected labels at full alpha on the first frame', () => {
+  const arbiter = new LabelArbiter();
+  const one = [candidate('flights', 1)];
+  arbiter.solve(one, { capacity: 1, now: 1000 });
+  const rendered = arbiter.renderEntries(one, 1001, [], { instantFades: true });
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].temporalAlpha, 1, 'no enter ramp under reduced motion');
+});
+
+test('instantFades drops exit tails immediately, owing zero follow-up frames', () => {
+  const arbiter = new LabelArbiter();
+  const one = [candidate('flights', 1)];
+  arbiter.solve(one, { capacity: 1, now: 1000 });
+  arbiter.solve([], { capacity: 0, now: 1200 });
+  assert.ok(arbiter.renderEntries([], 1201)[0].temporalAlpha > 0, 'animated path keeps the tail');
+  assert.equal(
+    arbiter.renderEntries([], 1201, [], { instantFades: true }).length,
+    0,
+    'reduced-motion path settles the same frame',
+  );
+});
+
 test('renderEntries reuses output without filter, slice, or sort allocation helpers', () => {
   const arbiter = new LabelArbiter();
   const objects = [candidate('flights', 1), candidate('flights', 2, 80)];

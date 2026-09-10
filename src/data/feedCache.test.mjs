@@ -4,6 +4,7 @@ import {
   fetchWithCache,
   fetchJsonWithCache,
   clearFeedCache,
+  COALESCE_WINDOW_MS,
   _resetFeedCacheForTest,
 } from './feedCache.js';
 
@@ -132,4 +133,62 @@ test('non-GET methods bypass the cache entirely', async () => {
   await fetchWithCache('https://x.test/post', { method: 'POST' });
   assert.equal(calls, 2, 'both calls hit the network');
   delete globalThis.fetch;
+});
+
+test('concurrent signal-less callers for one URL share a single upstream request', async () => {
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  globalThis.fetch = async () => {
+    calls += 1;
+    await gate;
+    return jsonResponse({ value: 'shared' });
+  };
+  try {
+    const [first, second, third] = await Promise.all([
+      fetchWithCache('https://x.test/burst', { ttlMs: 0 }),
+      fetchWithCache('https://x.test/burst', { ttlMs: 0 }),
+      fetchWithCache('https://x.test/burst', { ttlMs: 0 }),
+    ].map((pending, index) => {
+      if (index === 0) queueMicrotask(() => release());
+      return pending;
+    }));
+    assert.equal(calls, 1, 'one upstream request serves the whole burst');
+    assert.equal(first.json.value, 'shared');
+    assert.equal(second.json.value, 'shared');
+    assert.equal(third.json.value, 'shared');
+  } finally {
+    delete globalThis.fetch;
+  }
+});
+
+test('callers with an AbortSignal bypass coalescing (abort stays caller-local)', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return jsonResponse({ value: 'solo' }); };
+  try {
+    const controller = new AbortController();
+    const [plain, signalled] = await Promise.all([
+      fetchWithCache('https://x.test/noshare', { ttlMs: 0 }),
+      fetchWithCache('https://x.test/noshare', { ttlMs: 0, signal: controller.signal }),
+    ]);
+    assert.equal(calls, 2, 'a signalled caller never rides a stranger’s request');
+    assert.equal(plain.json.value, 'solo');
+    assert.equal(signalled.json.value, 'solo');
+  } finally {
+    delete globalThis.fetch;
+  }
+});
+
+test('the coalescing window expires: later callers fetch again', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return jsonResponse({ value: calls }); };
+  try {
+    await fetchWithCache('https://x.test/window', { ttlMs: 0 });
+    await new Promise((r) => setTimeout(r, COALESCE_WINDOW_MS + 25));
+    const second = await fetchWithCache('https://x.test/window', { ttlMs: 0 });
+    assert.equal(calls, 2, 'outside the window a fresh upstream request fires');
+    assert.equal(second.json.value, 2);
+  } finally {
+    delete globalThis.fetch;
+  }
 });

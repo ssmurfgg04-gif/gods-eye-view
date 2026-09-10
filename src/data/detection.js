@@ -95,6 +95,25 @@ const THEME_MAP = DETECTION_THEME_MAP;
 const SPARSE_ZONE_FRACTION = 0.5;
 /** Solve cadence for membership/collision; accepted identities still reproject every frame. */
 const LABEL_SOLVE_INTERVAL_MS = 125;
+
+/**
+ * Whether the OS requests reduced motion. Labels then paint with hard
+ * cliffs (no 150/300 ms fade ramps), which also terminates fade-driven
+ * render demand on the settling frame instead of up to 300 ms later.
+ * Evaluated per paint (matchMedia().matches is a cheap flag read) so a
+ * mid-session OS toggle takes effect without a reload. Node-safe: tests
+ * and non-DOM contexts read full-motion defaults.
+ * @returns {boolean} True when fades must be instant.
+ */
+export function detectionPrefersReducedMotion() {
+  try {
+    return typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+  } catch {
+    return false;
+  }
+}
 /** Alpha bands retain bracket batching while approximating a continuous radial fade. */
 const BRACKET_ALPHA_STEPS = 4;
 /** Stable per-layer candidate safety cap; independent of density and camera bearing. */
@@ -1366,7 +1385,9 @@ function _drawOverlay(frame) {
     }
   }
 
-  const renderEntries = _labelArbiter.renderEntries(candidateMap, now);
+  const renderEntries = _labelArbiter.renderEntries(candidateMap, now, [], {
+    instantFades: detectionPrefersReducedMotion(),
+  });
   const fadingCount = countFadingRenderEntries(renderEntries);
   // Demand counts fades in BOTH directions; `fadingCount` above stays the
   // fade-OUT tail because that is what the published diagnostics have always

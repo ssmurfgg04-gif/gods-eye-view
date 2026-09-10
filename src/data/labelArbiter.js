@@ -1055,17 +1055,33 @@ export class LabelArbiter {
   /**
    * Reproject accepted/fading identities from the current frame candidate map.
    * A caller-owned output array enables allocation-free per-frame rendering.
+   *
+   * @param {Map|Array} currentCandidates - This frame's candidate map.
+   * @param {number} [now] - Frame timestamp in ms.
+   * @param {Array} [out] - Caller-owned output array (reused, allocation-free).
+   * @param {object} [options]
+   * @param {boolean} [options.instantFades] - Reduced-motion path: selected
+   *   entries paint at full alpha immediately and deselected entries vanish
+   *   with no exit tail. Terminates fade demand on the same frame the cohort
+   *   settles instead of 150–300 ms later.
    */
-  renderEntries(currentCandidates, now = Date.now(), out = []) {
+  renderEntries(currentCandidates, now = Date.now(), out = [], options = {}) {
     const current = currentCandidates instanceof Map
       ? currentCandidates
       : new Map((currentCandidates || []).map((candidate) => [candidate.key, candidate]));
+    const instantFades = options?.instantFades === true;
     const states = this._refreshStateList();
     let outIndex = 0;
     for (let i = 0; i < states.length; i++) {
       const state = states[i];
       let temporalAlpha;
-      if (state.stateless) {
+      if (instantFades) {
+        // Reduced motion: hard cliffs for every entry, matching the stateless
+        // contract — fully painted this solve, or gone. No enter ramp means a
+        // newly selected label is visible on its first frame; no exit tail
+        // means deselection owes zero follow-up frames.
+        temporalAlpha = state.selected ? 1 : 0;
+      } else if (state.stateless) {
         // Hard cliffs, matching a per-frame rebuild: a stateless entry is either
         // fully painted this solve or gone. No enter ramp, no exit tail.
         temporalAlpha = state.selected ? 1 : 0;

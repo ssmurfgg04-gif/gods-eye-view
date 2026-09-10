@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import trafficLayer, {
   deriveTrafficFlowError,
   trafficFeedPresentation,
+  viewportDemandForAltitude,
 } from './traffic.js';
 import { DataLayerManager, layerFeedState } from './manager.js';
 
@@ -142,6 +143,21 @@ test('the manager reads keyless as FALLBACK and an outage as DEGRADED', () => {
     }),
     'degraded',
   );
+});
+
+test('viewport demand bands stretch polling at globe altitude, full at street level', () => {
+  assert.equal(viewportDemandForAltitude(1_200), 1, 'street level polls at full cadence');
+  assert.equal(viewportDemandForAltitude(400_000), 1, 'band edge stays full');
+  assert.equal(viewportDemandForAltitude(400_001), 0.6, 'regional view stretches');
+  assert.equal(viewportDemandForAltitude(2_000_000), 0.4, 'continental view stretches further');
+  assert.equal(viewportDemandForAltitude(12_000_000), 0.2, 'whole-globe view polls at 5× interval');
+});
+
+test('viewport demand never silences on missing evidence', () => {
+  for (const unknown of [Infinity, NaN, -1, 0, undefined, null]) {
+    assert.equal(viewportDemandForAltitude(unknown), 1, `unknown altitude reads full demand (${String(unknown)})`);
+  }
+  assert.equal(trafficLayer.getViewportDemand(), 1, 'no viewer/camera reads full demand, never throws');
 });
 
 test('the shipped layer boots keyless-honest before any status check', () => {

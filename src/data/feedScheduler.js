@@ -24,6 +24,10 @@
  * - **No overlapping ticks** — if a tick is still in flight when the next is
  *   due (a slow upstream), the due tick is skipped, not queued. Polls never
  *   pile up behind a slow response.
+ * - **Viewport-aware demand** — a job may supply `demandScale()` in [0, 1].
+ *   0 skips the tick (serve-stale keeps the layer alive; skips are not
+ *   failures, like circuit-open); (0, 1) stretches the interval up to 20×.
+ *   The scheduler never polls faster than the configured interval.
  * - **Diagnostics** — `getFeedSchedulerDiagnostics()` reports every job's
  *   cadence, backoff multiplier, last result, and circuit state for the
  *   debug console.
@@ -53,6 +57,13 @@ const DEFAULT_RECOVERY_SUCCESSES = 2;
 const BACKOFF_MULTIPLIER = 2;
 /** @constant {number} Diagnostics cap for last tick outcomes per job. */
 const HISTORY_CAP = 8;
+/**
+ * Floor for viewport demand scaling. A positive scale below this still
+ * stretches the interval to at most 1/FLOOR× (20×) instead of parking the
+ * job — only an exact 0 skips. Prevents a near-zero-but-honest reading from
+ * silencing a feed indefinitely.
+ */
+const MIN_POSITIVE_DEMAND_SCALE = 0.05;
 
 /**
  * @typedef {object} FeedSchedulerJob
@@ -63,6 +74,13 @@ const HISTORY_CAP = 8;
  * @property {number} [maxBackoffMs] Backoff ceiling for this job.
  * @property {boolean} [pauseWhenHidden=true] Skip ticks while the tab is hidden.
  * @property {number} [initialDelayMs] Override the jittered first-fire delay.
+ * @property {() => number} [demandScale] Viewport-aware demand multiplier in
+ *   [0, 1], sampled per tick. 1 = full demand (today's cadence); 0.25 =
+ *   quarter demand (4× interval stretch, e.g. a viewport-bounded layer at
+ *   whole-globe altitude); 0 = no demand — the tick is skipped (not a
+ *   failure, no backoff) and re-armed at the base cadence. Values above 1
+ *   are clamped to 1: the scheduler only ever slows polling, never speeds
+ *   it past the configured interval. Throwing/non-finite reads as 1.
  * @property {() => void} [onError] Failure hook (layers keep their own chips).
  * @property {string} [healthId] Feed-health circuit identity. Defaults to
  *   the job id; pass a shared id to make several jobs share one circuit
@@ -118,6 +136,8 @@ class FeedSchedulerImpl {
       successesSinceBackoff: 0,
       inFlight: false,
       lastTickAt: 0,
+      lastDemandScale: 1,
+      demandSkips: 0,
       lastResult: 'pending',
       history: [],
       timer: null,
@@ -154,11 +174,38 @@ class FeedSchedulerImpl {
     return this._jobs.has(id);
   }
 
-  /** Current effective interval (base + active backoff), for diagnostics. */
+  /**
+   * Current effective interval (demand-stretched base + active backoff).
+   * @param {string} id Job id.
+   * @returns {number} Effective interval in ms.
+   */
   effectiveIntervalMs(id) {
     const entry = this._jobs.get(id);
     if (!entry) return 0;
-    return Math.min(entry.intervalMs + entry.backoffMs, entry.maxBackoffMs);
+    return Math.min(
+      this._stretchedBaseMs(entry) + entry.backoffMs,
+      entry.maxBackoffMs,
+    );
+  }
+
+  /** Base interval stretched by the last sampled viewport demand. */
+  _stretchedBaseMs(entry) {
+    const scale = Number(entry.lastDemandScale);
+    if (!Number.isFinite(scale) || scale >= 1) return entry.intervalMs;
+    if (scale <= 0) return entry.intervalMs;
+    return entry.intervalMs / Math.max(scale, MIN_POSITIVE_DEMAND_SCALE);
+  }
+
+  /** Sample a job's viewport demand hook; throwing/non-finite reads as 1. */
+  _sampleDemandScale(entry) {
+    if (typeof entry.demandScale !== 'function') return 1;
+    try {
+      const scale = Number(entry.demandScale());
+      if (!Number.isFinite(scale) || scale < 0) return 1;
+      return Math.min(scale, 1);
+    } catch {
+      return 1;
+    }
   }
 
   _jitter(intervalMs) {
@@ -187,9 +234,21 @@ class FeedSchedulerImpl {
       this._arm(entry, 1000);
       return;
     }
+    // Viewport-aware adaptive polling: a layer whose viewport currently
+    // needs nothing (scale 0) skips the tick entirely — not a failure, no
+    // backoff, no circuit sample — and re-checks next cadence. A partial
+    // scale stretches the interval below instead of skipping.
+    const demandScale = this._sampleDemandScale(entry);
+    entry.lastDemandScale = demandScale;
+    if (demandScale === 0) {
+      entry.lastResult = 'demand-skip';
+      entry.demandSkips += 1;
+      this._arm(entry, this._jitter(entry.intervalMs));
+      return;
+    }
     if (entry.inFlight) {
       // Slow upstream: skip this due tick entirely, never queue a second.
-      this._arm(entry, this._jitter(entry.intervalMs));
+      this._arm(entry, this._jitter(this._stretchedBaseMs(entry)));
       return;
     }
     // Circuit breaker (feed health): while the feed's circuit is open, the
@@ -256,7 +315,7 @@ class FeedSchedulerImpl {
         }
       }
     }
-    const next = this._jitter(Math.min(entry.intervalMs + entry.backoffMs, entry.maxBackoffMs));
+    const next = this._jitter(Math.min(this._stretchedBaseMs(entry) + entry.backoffMs, entry.maxBackoffMs));
     this._arm(entry, next);
   }
 
@@ -272,6 +331,8 @@ class FeedSchedulerImpl {
         lastTickAt: entry.lastTickAt,
         lastResult: entry.lastResult,
         inFlight: entry.inFlight,
+        demandScale: entry.lastDemandScale ?? 1,
+        demandSkips: entry.demandSkips ?? 0,
         healthId: entry.healthId ?? entry.id,
         circuit: this._health ? this._health.shouldAttempt(entry.healthId ?? entry.id).state : 'off',
       });

@@ -658,6 +658,7 @@ export class DataLayerManager {
         id: `layer:${layerId}`,
         intervalMs: refreshInterval,
         pauseWhenHidden: true,
+        demandScale: () => this._layerDemandScale(layerId, entry),
         tick: () => this._runPeriodicUpdate(layerId, entry).then((ok) => ok !== false),
       });
       entry.feedJobId = `layer:${layerId}`;
@@ -666,6 +667,7 @@ export class DataLayerManager {
         id: `layer-stats:${layerId}`,
         intervalMs: entry.module.statsRefreshInterval || 1000,
         pauseWhenHidden: true,
+        demandScale: () => this._layerDemandScale(layerId, entry),
         tick: () => {
           if (!entry.enabled) return true;
           this._refreshTogglePanel();
@@ -673,6 +675,29 @@ export class DataLayerManager {
         },
       });
       entry.feedJobId = `layer-stats:${layerId}`;
+    }
+  }
+
+  /**
+   * Viewport demand for a layer's scheduled job, in [0, 1]. Layers that do
+   * not implement the optional `getViewportDemand()` hook poll at full
+   * cadence — this only ever slows polling, never speeds it. A disabled
+   * layer reports zero demand so its job skips until re-enabled.
+   * @param {string} layerId
+   * @param {object} entry Layer registry entry.
+   * @returns {number} Demand multiplier in [0, 1].
+   */
+  _layerDemandScale(layerId, entry) {
+    void layerId;
+    try {
+      if (!entry?.enabled) return 0;
+      const scale = entry.module?.getViewportDemand?.();
+      if (scale == null) return 1;
+      const value = Number(scale);
+      if (!Number.isFinite(value) || value < 0) return 1;
+      return Math.min(value, 1);
+    } catch {
+      return 1;
     }
   }
 

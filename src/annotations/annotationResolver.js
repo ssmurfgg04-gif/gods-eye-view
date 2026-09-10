@@ -2,6 +2,7 @@ import * as Cesium from 'cesium';
 import { lookupNeighborhoodRing } from '../data/neighborhoodPolygons.js';
 import { lookupNaturalRegionOutline, findNaturalRegion } from '../data/naturalEarthRegions.js';
 import { registerDynamicCredit, NATURAL_EARTH_CREDIT } from '../data/dataCredits.js';
+import { GEOCODE_FALLBACK_CREDIT } from '../geocodeFallback.js';
 import { isPickedWorldPosition } from '../data/scenePick.js';
 
 /**
@@ -140,7 +141,7 @@ export async function resolveAnnotationTarget({
         }
       }
       if (source !== 'places') {
-        const geocoded = await geocodePlace(query, viewportBias(viewer), signal);
+        const geocoded = await geocodePlace(query, viewportBias(viewer), signal, viewer);
         if (geocoded) {
           lat = geocoded.lat;
           lon = geocoded.lon;
@@ -601,47 +602,75 @@ function ringAreaM2(ring) {
 /**
  * Forward-geocode a place name via Google Geocoding, biased to the current
  * viewport so "the marina" resolves near where the user is looking.
+ *
+ * Keyless fallback: without a Google key — or when Google misses — the query
+ * falls through to the free Nominatim path (`src/geocodeFallback.js`, ODbL).
+ * The fallback is unbiased global search with no place viewport, so it lands
+ * on the point, never a framed box; provenance is stamped on the result.
  */
-async function geocodePlace(query, biasRect, signal) {
+async function geocodePlace(query, biasRect, signal, viewer = null) {
   const apiKey = window.__GOOGLE_MAPS_API_KEY__ || import.meta.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) return null;
 
   const cacheKey = `${query.toLowerCase()}|${biasRect || ''}`;
   const cached = cacheRead(geocodeCache, cacheKey);
   if (cached !== undefined) return cached;
 
-  let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
-  if (biasRect) url += `&bounds=${biasRect}`;
+  if (apiKey) {
+    let url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
+    if (biasRect) url += `&bounds=${biasRect}`;
 
-  try {
-    const response = await fetch(url, { signal });
-    const data = await response.json();
-    if (data.status !== 'OK' || !data.results?.length) {
+    try {
+      const response = await fetch(url, { signal });
+      const data = await response.json();
+      if (data.status === 'OK' && data.results?.length) {
+        const place = normalizeGooglePlace(data.results[0]);
+        cacheWrite(geocodeCache, cacheKey, place);
+        return place;
+      }
       // ZERO_RESULTS is a definitive not-found (cacheable); OVER_QUERY_LIMIT /
       // REQUEST_DENIED / UNKNOWN_ERROR are transient → don't poison the cache.
       negCache(geocodeCache, cacheKey, signal, data?.status === 'ZERO_RESULTS');
-      return null;
+      if (data?.status === 'ZERO_RESULTS') return null;
+      // Transient Google failure → try the free fallback below instead of
+      // giving up (a quota outage should not blank annotations).
+    } catch {
+      negCache(geocodeCache, cacheKey, signal, false); // network/abort — transient
+      if (signal?.aborted) return null;
+      // Fall through to the free fallback.
     }
-    const result = data.results[0];
-    const place = {
-      lat: result.geometry.location.lat,
-      lon: result.geometry.location.lng,
-      label: shortLabel(result.formatted_address),
-      // The CANONICAL name of the resolved feature (e.g. "Mission District",
-      // "Texas State Capitol") — used for OSM name-matching instead of the raw
-      // utterance, so incidental tokens ("...Texas", "...Austin") can't win.
-      primaryName: extractPrimaryName(result),
-      types: result.types || [],
-      // Geocode viewport (sw/ne box framing the feature), normalized to the Places
-      // low/high shape — sizes grounds discs and flyTo framing for geocode anchors.
-      viewport: normalizeGeocodeViewport(result.geometry?.bounds || result.geometry?.viewport),
-    };
-    cacheWrite(geocodeCache, cacheKey, place);
-    return place;
-  } catch {
-    negCache(geocodeCache, cacheKey, signal, false); // network/abort — transient
-    return null;
   }
+
+  try {
+    const { forwardGeocodeFallback } = await import('../geocodeFallback.js');
+    const place = await forwardGeocodeFallback(query, { signal });
+    if (place) {
+      try {
+        registerDynamicCredit(viewer, GEOCODE_FALLBACK_CREDIT);
+      } catch { /* attribution is best-effort outside a viewer context */ }
+      cacheWrite(geocodeCache, cacheKey, place);
+      return place;
+    }
+  } catch { /* fallback is best-effort; fall through to the negative cache */ }
+  negCache(geocodeCache, cacheKey, signal, false);
+  return null;
+}
+
+/** Map one Google Geocoding result into the shared place shape. */
+function normalizeGooglePlace(result) {
+  const place = {
+    lat: result.geometry.location.lat,
+    lon: result.geometry.location.lng,
+    label: shortLabel(result.formatted_address),
+    // The CANONICAL name of the resolved feature (e.g. "Mission District",
+    // "Texas State Capitol") — used for OSM name-matching instead of the raw
+    // utterance, so incidental tokens ("...Texas", "...Austin") can't win.
+    primaryName: extractPrimaryName(result),
+    types: result.types || [],
+    // Geocode viewport (sw/ne box framing the feature), normalized to the Places
+    // low/high shape — sizes grounds discs and flyTo framing for geocode anchors.
+    viewport: normalizeGeocodeViewport(result.geometry?.bounds || result.geometry?.viewport),
+  };
+  return place;
 }
 
 /** Geocoding returns {southwest:{lat,lng},northeast:{lat,lng}}; normalize to the Places

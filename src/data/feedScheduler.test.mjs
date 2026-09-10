@@ -237,6 +237,72 @@ test('two jobs sharing a healthId share one circuit', async () => {
   }
 });
 
+test('zero viewport demand skips ticks without failing or backing off', async () => {
+  const scheduler = createFeedScheduler({ health: null });
+  let ticks = 0;
+  const cancel = scheduler.schedule({
+    id: 'parked',
+    intervalMs: 100,
+    initialDelayMs: 0,
+    demandScale: () => 0,
+    tick: () => { ticks += 1; return true; },
+  });
+  try {
+    await waitFor(() => {
+      const job = scheduler.getFeedSchedulerDiagnostics().jobs.find((j) => j.id === 'parked');
+      return job && job.demandSkips >= 2;
+    }, 3000, 'demand skips accumulate');
+    assert.equal(ticks, 0, 'a zero-demand job never runs its tick body');
+    const job = scheduler.getFeedSchedulerDiagnostics().jobs.find((j) => j.id === 'parked');
+    assert.equal(job.lastResult, 'demand-skip');
+    assert.equal(job.demandScale, 0);
+    assert.equal(scheduler.effectiveIntervalMs('parked'), 100, 'skips do not grow backoff');
+  } finally {
+    cancel();
+  }
+});
+
+test('partial viewport demand stretches the effective interval', async () => {
+  const scheduler = createFeedScheduler({ health: null });
+  let ticks = 0;
+  const cancel = scheduler.schedule({
+    id: 'far',
+    intervalMs: 200,
+    initialDelayMs: 0,
+    demandScale: () => 0.25,
+    tick: () => { ticks += 1; return true; },
+  });
+  try {
+    await waitFor(() => ticks >= 1, 3000, 'first tick samples demand');
+    assert.equal(scheduler.effectiveIntervalMs('far'), 800, 'quarter demand quadruples the interval');
+    const job = scheduler.getFeedSchedulerDiagnostics().jobs.find((j) => j.id === 'far');
+    assert.equal(job.demandScale, 0.25);
+    await sleep(500);
+    assert.equal(ticks, 1, 'the stretched interval holds back the second tick');
+  } finally {
+    cancel();
+  }
+});
+
+test('a throwing demand hook reads as full demand', async () => {
+  const scheduler = createFeedScheduler({ health: null });
+  let ticks = 0;
+  const cancel = scheduler.schedule({
+    id: 'hook-broken',
+    intervalMs: 50,
+    initialDelayMs: 0,
+    demandScale: () => { throw new Error('teardown race'); },
+    tick: () => { ticks += 1; return true; },
+  });
+  try {
+    await waitFor(() => ticks >= 2, 3000, 'ticks proceed at full cadence');
+    const job = scheduler.getFeedSchedulerDiagnostics().jobs.find((j) => j.id === 'hook-broken');
+    assert.equal(job.demandScale, 1);
+  } finally {
+    cancel();
+  }
+});
+
 test('health tracking can be disabled entirely for hermetic legacy tests', async () => {
   const scheduler = createFeedScheduler({ health: null });
   let ticks = 0;
