@@ -6,6 +6,8 @@ export const SPRITE_LAYER_ORDER = Object.freeze([
   'ais',
   'military',
   'flights',
+  // User-placed route UI paints above data contacts.
+  'directions',
 ]);
 
 /** @type {Map<string, Object>} */

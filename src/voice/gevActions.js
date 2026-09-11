@@ -182,6 +182,9 @@ const LAYER_ALIASES = new Map([
   ['sea marks', 'osm-overlays'],
   ['ski pistes', 'osm-overlays'],
   ['map overlays', 'osm-overlays'],
+  ['directions', 'directions'],
+  ['routing', 'directions'],
+  ['route', 'directions'],
 ]);
 
 const CITY_ALIASES = new Map([

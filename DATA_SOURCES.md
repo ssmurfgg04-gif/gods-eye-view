@@ -30,6 +30,7 @@ How to read this:
 | **OpenStreetMap (Overpass API)** | Road geometry for traffic | ODbL 1.0 | "© OpenStreetMap contributors" |
 | **TomTom Traffic API** (flow vector tiles) | Live congestion coloring for the traffic layer (optional, BYOK) | [TomTom for Developers terms](https://developer.tomtom.com) (proprietary, your own key; free tier currently 200K tile requests/month — see [current pricing](https://docs.tomtom.com/pricing/)) | "Traffic flow data © TomTom" — registered when live mode activates |
 | **OpenStreetMap (Overpass API)** | Viewport-bounded mapped installation context for Global Context | ODbL 1.0 | "© OpenStreetMap contributors" (incomplete mapped context) |
+| **OSRM (FOSSGIS)** | Keyless A→B street routing with turn-by-turn steps (Directions layer, voice routes) | BSD-licensed router; ODbL map data | "OSM routing" + per-route OSM attribution |
 | **OpenStreetMap (Nominatim)** | Reverse-geocoded place label in the cockpit Local Info page | ODbL 1.0 + Nominatim usage policy | "© OpenStreetMap contributors" |
 | **Photon (komoot)** | Keyless forward place-search fallback ("fly to X" with no Google key, annotation + Radio resolution) | Free public instance, fair use; underlying data ODbL 1.0 | "Keyless place search by Photon" (registered when first used) |
 | **Open-Meteo** | Current weather in the cockpit Local Info page and cockpit-local dynamic atmospheric effects | [CC BY 4.0 data licence and adjacent-link attribution requirement](https://open-meteo.com/en/licence) | Linked "Weather data by Open-Meteo.com" beside the displayed local data |

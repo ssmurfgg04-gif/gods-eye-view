@@ -190,4 +190,13 @@ export const LAZY_LAYER_MANIFEST = Object.freeze([
     statsRefreshInterval: 5000,
     loader: () => import('./osmOverlays.js'),
   }),
+  Object.freeze({
+    id: 'directions',
+    name: 'Directions',
+    icon: '🧭',
+    source: 'OSM routing',
+    updateInterval: 0,
+    statsRefreshInterval: 5000,
+    loader: () => import('./directions.js'),
+  }),
 ]);

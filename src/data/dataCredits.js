@@ -67,6 +67,13 @@ export const DATA_CREDITS = [
     html: 'Earthquakes: Data courtesy of the U.S. Geological Survey',
   },
   {
+    key: 'osrm-directions',
+    html:
+      'Turn-by-turn routing: OSRM on FOSSGIS servers ' +
+      '(<a href="https://routing.openstreetmap.de" target="_blank" rel="noopener">routing.openstreetmap.de</a>), ' +
+      'data <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a> (ODbL 1.0)',
+  },
+  {
     key: 'nifc-wfigs',
     html:
       'Wildfire incidents: National Interagency Fire Center WFIGS ' +

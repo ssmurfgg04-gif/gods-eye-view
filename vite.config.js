@@ -48,6 +48,7 @@ import { createRequire } from 'node:module';
 import { defineConfig, loadEnv } from 'vite';
 import cesium from 'vite-plugin-cesium';
 import { normalizeRadioCountryInput } from './src/data/radioCountry.js';
+import { normalizeOsrmSteps } from './src/data/routeSteps.js';
 import { admitSameSiteRequest } from './src/localRequestGate.mjs';
 import {
   normalizeRegionalArticles,
@@ -2961,8 +2962,9 @@ function overpassProxy() {
             totalKm += legKm;
           }
           if (totalKm > ROUTE_MAX_TOTAL_KM) return fail('route too long');
+          const withSteps = url.searchParams.get('steps') === '1';
           const coords = clean.join(';');
-          const cacheKey = `${profile}|${coords}`;
+          const cacheKey = `${profile}|${withSteps ? 'steps|' : ''}${coords}`;
           const now = Date.now();
           const cached = _routeCache.get(cacheKey);
           if (cached && now - cached.cachedAt <= ROUTE_CACHE_MS) {
@@ -2970,7 +2972,7 @@ function overpassProxy() {
             res.end(JSON.stringify(cached.payload));
             return;
           }
-          const upstream = `https://routing.openstreetmap.de/routed-${profile}/route/v1/${osrmProfile}/${coords}?overview=full&geometries=geojson&alternatives=false&steps=false`;
+          const upstream = `https://routing.openstreetmap.de/routed-${profile}/route/v1/${osrmProfile}/${coords}?overview=full&geometries=geojson&alternatives=false&steps=${withSteps ? 'true' : 'false'}`;
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 12000);
           let osrm;
@@ -2996,6 +2998,9 @@ function overpassProxy() {
             durationS: Math.round(route.duration),
             geometry: route.geometry.coordinates,
           };
+          if (withSteps) {
+            payload.steps = normalizeOsrmSteps(route);
+          }
           _routeCache.set(cacheKey, { payload, cachedAt: now });
           if (_routeCache.size > 200) _routeCache.delete(_routeCache.keys().next().value);
           res.writeHead(200, { 'Content-Type': 'application/json' });
