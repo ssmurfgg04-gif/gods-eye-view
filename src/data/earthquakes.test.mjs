@@ -16,6 +16,7 @@ import {
   createEarthquakesLayer,
   mapAnalystRecord,
   selectEarthquakeOverlayCohort,
+  validateEarthquakeFeatures,
 } from './earthquakes.js';
 import { DataLayerManager } from './manager.js';
 import {
@@ -563,4 +564,24 @@ test('a mixed cohort ranks scored entries ahead of unscored ones', () => {
   // Known relevance (even modest) outranks unknown-but-claimed priority.
   assert.equal(cohort[0].id, 'scored');
   assert.equal(cohort.length, 2);
+});
+
+test('snapshot validation rejects malformed rows and duplicate ids, first wins', () => {
+  const good = (id, mag = 5.2) => ({
+    id,
+    geometry: { coordinates: [-150.41, 61.02] },
+    properties: { mag },
+  });
+  const noMagnitude = { id: 'b', geometry: { coordinates: [-150.41, 61.02] }, properties: {} };
+  const valid = validateEarthquakeFeatures([
+    good('a'),
+    good('a'), // duplicate rendered id — one quake, one entity
+    noMagnitude, // missing magnitude never establishes eligibility
+    { id: 'c', geometry: null, properties: { mag: 6 } },
+    { id: 'd', geometry: { coordinates: [200, 61.02] }, properties: { mag: 6 } },
+    { id: 'e', geometry: { coordinates: [-150.41] }, properties: { mag: 6 } },
+    good('f', 6.1),
+    null,
+  ]);
+  assert.deepEqual(valid.map((feature) => feature.id), ['a', 'f']);
 });

@@ -192,6 +192,36 @@ export function mapAnalystRecord(raw, index = 0) {
   };
 }
 
+/**
+ * Validate a USGS snapshot before it touches the live entity set. Rejects
+ * malformed geometry, out-of-range coordinates, non-finite magnitude
+ * (missing magnitude never establishes M2.5+ eligibility), and duplicate
+ * event ids — a repeated id would otherwise build two entities for one
+ * quake. Pure, so the contract is unit-testable without a viewer.
+ * @param {Array} features Raw GeoJSON features.
+ * @returns {Array} Valid features, first-wins on duplicate ids.
+ */
+export function validateEarthquakeFeatures(features) {
+  const valid = [];
+  const seenIds = new Set();
+  for (const feature of features || []) {
+    if (!feature || !feature.geometry) continue;
+    const coordinates = feature.geometry.coordinates;
+    if (!Array.isArray(coordinates) || coordinates.length < 2) continue;
+    const [lon, lat] = coordinates;
+    const mag = Number(feature.properties?.mag);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(mag)) continue;
+    if (lon < -180 || lon > 180 || lat < -90 || lat > 90) continue;
+    const eventId = feature.id != null ? String(feature.id) : null;
+    if (eventId != null) {
+      if (seenIds.has(eventId)) continue;
+      seenIds.add(eventId);
+    }
+    valid.push(feature);
+  }
+  return valid;
+}
+
 export function createEarthquakesLayer({ overlayHost = DEFAULT_OVERLAY_HOST } = {}) {
   let _dataSource = null;
   let _count = 0;
@@ -282,17 +312,7 @@ let _servingStale = false;
       // non-finite magnitude, non-array coordinates), leaving the layer
       // permanently blank until the next successful poll. A bad snapshot now
       // keeps the previous render intact.
-      const validFeatures = [];
-      for (const feature of geojson.features) {
-        if (!feature || !feature.geometry) continue;
-        const coordinates = feature.geometry.coordinates;
-        if (!Array.isArray(coordinates) || coordinates.length < 2) continue;
-        const [lon, lat, _depthKm] = coordinates;
-        const mag = Number(feature.properties?.mag);
-        if (!Number.isFinite(lon) || !Number.isFinite(lat) || !Number.isFinite(mag)) continue;
-        if (lon < -180 || lon > 180 || lat < -90 || lat > 90) continue;
-        validFeatures.push(feature);
-      }
+      const validFeatures = validateEarthquakeFeatures(geojson.features);
       if (!validFeatures.length && geojson.features.length) {
         _lastError = 'USGS snapshot failed validation — keeping prior entities';
         console.warn('[Data:Earthquakes] Snapshot rejected by validation; retained previous entities');

@@ -11,7 +11,7 @@ import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import createViteConfig, { fetchOverpassPayload, overpassPayloadIsData, readOverpassDisk } from '../vite.config.js';
+import createViteConfig, { fetchOverpassPayload, fetchOsmMapRoadPayload, overpassPayloadIsData, parseOsmMapRoads, readOverpassDisk } from '../vite.config.js';
 
 const ENDPOINTS = ['https://a.example/api', 'https://b.example/api', 'https://c.example/api'];
 
@@ -222,4 +222,76 @@ test('coalesced outage callers both receive last-good data, never a cached refus
       await unlink(file);
     }
   }
+});
+
+const OSM_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <node id="1" lat="30.267" lon="-97.743"/>
+  <node id="2" lat="30.268" lon="-97.744"/>
+  <node id="3" lat="30.269" lon="-97.745"/>
+  <way id="10">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Congress &amp; 6th"/>
+  </way>
+  <way id="11">
+    <nd ref="1"/><nd ref="2"/>
+    <tag k="highway" v="motorway"/>
+  </way>
+  <way id="12">
+    <nd ref="1"/><nd ref="2"/>
+    <tag k="highway" v="footway"/>
+  </way>
+  <way id="13">
+    <nd ref="1"/>
+    <tag k="highway" v="residential"/>
+  </way>
+</osm>`;
+
+function trafficBody(bounds = '30.26,-97.75,30.28,-97.73') {
+  const [s, w, n, e] = bounds.split(',');
+  const q = `[out:json][timeout:25];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"](${s},${w},${n},${e}););out geom qt;`;
+  return `data=${encodeURIComponent(q)}`;
+}
+
+test('OSM map XML parses into the Overpass-like way shape traffic.js consumes', () => {
+  const payload = parseOsmMapRoads(OSM_XML);
+  assert.equal(payload.version, 0.6);
+  assert.equal(payload.elements.length, 2, 'footway filtered, single-node way dropped');
+  const residential = payload.elements.find((el) => el.id === '10');
+  assert.equal(residential.tags.name, 'Congress & 6th', 'XML entities decoded');
+  assert.deepEqual(residential.geometry[0], { lat: 30.267, lon: -97.743 });
+  assert.equal(residential.geometry.length, 3);
+});
+
+test('OSM map fetch serves traffic queries and ignores everything else', async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(String(url));
+    return { ok: true, text: async () => OSM_XML, json: async () => ({}) };
+  };
+  const readBody = async (response) => response.text();
+  const payload = await fetchOsmMapRoadPayload(trafficBody(), 1024 * 1024, { fetchImpl, readBody });
+  assert.equal(payload.status, 200);
+  assert.equal(payload.endpoint, 'https://api.openstreetmap.org/api/0.6/map');
+  assert.ok(seen[0].includes('bbox='), 'viewport bbox forwarded to the map API');
+  assert.equal(JSON.parse(payload.body).elements.length, 2);
+
+  // Non-traffic queries (installations, annotations) stay on generic Overpass.
+  assert.equal(await fetchOsmMapRoadPayload('data=' + encodeURIComponent('[out:json];node["military"](1,2,3,4);out;'), 1024, { fetchImpl, readBody }), null);
+  assert.equal(await fetchOsmMapRoadPayload('data=' + encodeURIComponent('[out:json];(way["highway"~"^(motorway)$"](91,0,92,0););out;'), 1024, { fetchImpl, readBody }), null, 'out-of-range bbox rejected');
+  assert.equal(await fetchOsmMapRoadPayload('garbage', 1024, { fetchImpl, readBody }), null);
+});
+
+test('OSM map failures surface instead of poisoning the fallback', async () => {
+  const failing = async () => ({ ok: false, status: 503, text: async () => 'busy' });
+  await assert.rejects(
+    fetchOsmMapRoadPayload(trafficBody(), 1024 * 1024, { fetchImpl: failing, readBody: async (r) => r.text() }),
+    /OSM map returned 503/,
+  );
+  const badXml = async () => ({ ok: true, text: async () => '<html>nope</html>' });
+  await assert.rejects(
+    fetchOsmMapRoadPayload(trafficBody(), 1024 * 1024, { fetchImpl: badXml, readBody: async (r) => r.text() }),
+    /invalid XML/,
+  );
 });

@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased] — Data-quality hardening (upstream #225/#198/#197/#181/#185/#61)
+
+- Street Traffic survives Overpass outages via the bounded OSM Standard Map
+  API fallback (Overpass stays the fallback for everything else).
+- Earthquake snapshots reject duplicate event ids on top of the existing
+  whole-snapshot validation.
+- Launch payloads say PAYLOAD DATA UNAVAILABLE / Unnamed payload; missing or
+  invalid mass stays unknown instead of 0 KG.
+- FIRMS source success is recorded only after its rows append.
+- GBFS v3 LocalizedString station names resolve (en-first) instead of
+  `[object Object]`. (The #180 redirect refusal + streaming body cap were
+  already present and verified, not re-ported.)
+- Hand-written CCTV pack URLs are sanitized (https-only, no credentials);
+  bad ones fall back instead of holding a slot.
+
 ## [Unreleased] — MILLION-X wave 2: event bus, provenance, timeline, relevance, feed health
 
 Five architecture primitives ("what would you build with 1000×?"), each

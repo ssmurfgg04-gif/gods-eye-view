@@ -8,6 +8,7 @@ import {
   _selectBikeshareStationForTest,
   _setBikeshareSelectionStateForTest,
   createBikeshareSelectedOverlayEntry,
+  parseStationInformation,
 } from './bikeshare.js';
 
 function makeRecord() {
@@ -83,4 +84,44 @@ test('real station select/clear path publishes one card and creates no native la
   } finally {
     _clearBikeshareSelectionForTest();
   }
+});
+
+test('GBFS v3 LocalizedString names resolve instead of rendering [object Object]', () => {
+  const stations = parseStationInformation({
+    version: '3.0',
+    data: {
+      stations: [
+        {
+          station_id: 'v3-a',
+          name: [{ language: 'es', text: 'Estación Central' }, { language: 'en', text: 'Central Station' }],
+          short_name: [{ language: 'en', text: 'Central' }],
+          lat: 30.2672, lon: -97.7431,
+        },
+        {
+          station_id: 'v3-b',
+          name: [{ language: 'fr', text: 'Gare du Nord' }],
+          lat: 30.27, lon: -97.74,
+        },
+        {
+          station_id: 'v3-c',
+          name: [{ language: 'en', text: '' }],
+          short_name: 'Plain String',
+          lat: 30.27, lon: -97.74,
+        },
+      ],
+    },
+  });
+  assert.equal(stations.get('v3-a').name, 'Central Station', 'en preferred over first locale');
+  assert.equal(stations.get('v3-b').name, 'Gare du Nord', 'falls back to first available locale');
+  assert.equal(stations.get('v3-c').name, 'Plain String', 'mixed localized/plain rows resolve');
+});
+
+test('GBFS v2 plain-string names keep working unchanged', () => {
+  const stations = parseStationInformation({
+    version: '2.3',
+    data: {
+      stations: [{ station_id: 'v2-a', name: 'Congress & 6th', lat: 30.2672, lon: -97.7431 }],
+    },
+  });
+  assert.equal(stations.get('v2-a').name, 'Congress & 6th');
 });

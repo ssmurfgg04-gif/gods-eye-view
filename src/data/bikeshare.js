@@ -709,20 +709,31 @@ function extractStationsArray(payload) {
  * @param {Object} payload - Parsed station_information.json response.
  * @returns {Map<string, Object>} Map of stationId to station info objects.
  */
-function parseStationInformation(payload) {
+export function parseStationInformation(payload) {
   const stations = extractStationsArray(payload);
   const stationMap = new Map();
 
   for (const raw of stations) {
-    // Accept both GBFS 2.x (station_id) and alternate (id) field names
+    // Accept both GBFS (station_id) and alternate (id) field names
     const stationId = String(raw?.station_id ?? raw?.id ?? '').trim();
     const lat = Number(raw?.lat ?? raw?.latitude);
     const lon = Number(raw?.lon ?? raw?.longitude);
     if (!stationId || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
 
+    // GBFS v3 uses LocalizedString arrays for names; v2 uses plain strings.
+    // Default to 'en', then the first available locale — never [object Object].
+    const localizedName = (value) => {
+      if (typeof value === 'string') return value;
+      if (!Array.isArray(value)) return '';
+      const entry = value.find((row) => String(row?.language || '').toLowerCase() === 'en')
+        || value.find((row) => typeof row?.text === 'string')
+        || value[0];
+      return typeof entry?.text === 'string' ? entry.text : '';
+    };
+
     stationMap.set(stationId, {
       stationId,
-      name: String(raw?.name || raw?.short_name || '').trim(),
+      name: String(localizedName(raw?.name) || localizedName(raw?.short_name) || '').trim(),
       lat,
       lon,
       capacity: toNonNegativeInteger(raw?.capacity),

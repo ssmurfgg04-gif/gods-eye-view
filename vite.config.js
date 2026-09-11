@@ -213,6 +213,8 @@ const OVERPASS_UPSTREAMS = [
   // Verified: planet coverage (Texas query), CORS *, ~5-20 s cold latency.
   'https://overpass.private.coffee/api/interpreter',
 ];
+/** Standard OSM map endpoint used as a bounded road-geometry fallback. */
+const OSM_MAP_ENDPOINT = 'https://api.openstreetmap.org/api/0.6/map';
 /**
  * TTL for FRESH cached Overpass responses (ms). Road geometry is static for
  * months — the original 45 s TTL forced a public-mirror round-trip on nearly
@@ -236,6 +238,8 @@ const OVERPASS_BOUNDARY_DISK_TTL_MS = 30 * 86_400_000;
 const OVERPASS_DISK_DIR = path.join(process.cwd(), '.gev-cache', 'overpass');
 /** Per-upstream fetch timeout (ms). */
 const OVERPASS_TIMEOUT_MS = 22000;
+/** OSM map fallback timeout (ms). */
+const OSM_MAP_TIMEOUT_MS = 12000;
 /** Max entries in the Overpass response cache (LRU-like, oldest evicted first). */
 const OVERPASS_CACHE_MAX_ENTRIES = 120;
 /** @type {Map<string,{status:number,body:string,contentType:string,endpoint:string,cachedAt:number}>} */
@@ -2170,6 +2174,23 @@ function tomtomProxy() {
 }
 
 /**
+ * Append one FIRMS source's rows, then record its success — in that order.
+ * Success is recorded only after the rows are appended: if aggregation
+ * throws, the source reports failure without a contradictory success entry.
+ * NOT fires.push(...records): spread passes each record as an argument, and
+ * a world/2 VIIRS pull exceeds V8's argument limit (~125k) at ~131k records
+ * — RangeError, and the whole source is silently dropped.
+ * @param {Array} sources Source-status list to append to.
+ * @param {Array} fires Fire-record list to append to.
+ * @param {object} source Source descriptor.
+ * @param {Array} records Filtered records.
+ */
+export function appendFirmsSourceResult(sources, fires, source, records) {
+  for (const record of records) fires.push(record);
+  sources.push({ source, count: records.length, ok: true });
+}
+
+/**
  * NASA FIRMS live active-fire proxy with a memory + disk cache.
  * Upstream: https://firms.modaps.eosdis.nasa.gov/api/area/csv/{KEY}/{SOURCE}/world/2
  *
@@ -2257,11 +2278,7 @@ function firmsProxy() {
     for (const source of SOURCES) {
       try {
         const records = filterTrailing24h(await fetchSource(key, source), now);
-        sources.push({ source, count: records.length, ok: true });
-        // NOT fires.push(...records): spread passes each record as an argument,
-        // and a world/2 VIIRS pull exceeds V8's argument limit (~125k) at
-        // ~131k records — RangeError, and the whole source is silently dropped.
-        for (const record of records) fires.push(record);
+        appendFirmsSourceResult(sources, fires, source, records);
       } catch (err) {
         console.warn(`[firms-proxy] ${source} fetch failed:`, err?.message || err);
         sources.push({ source, count: 0, ok: false });
@@ -2736,6 +2753,174 @@ export function overpassPayloadIsData(payload) {
     && !payload.runtimeError;
 }
 
+const TRAFFIC_ROAD_HIGHWAYS = new Set([
+  'motorway', 'trunk', 'primary', 'secondary',
+  'tertiary', 'residential', 'unclassified',
+]);
+
+/**
+ * Extract the bounded road query shape emitted by src/data/traffic.js. The
+ * standard OSM map endpoint cannot execute arbitrary Overpass QL, so the
+ * fallback is deliberately limited to this exact highway+bbox form.
+ * @param {string} body URL-encoded Overpass QL query body.
+ * @returns {null|{south:number, west:number, north:number, east:number, highways:Set<string>}}
+ */
+function trafficRoadQuerySpec(body) {
+  let query;
+  try {
+    query = new URLSearchParams(String(body || '')).get('data');
+  } catch {
+    return null;
+  }
+  if (!query) return null;
+
+  const match = query.match(
+    /way\s*\[\s*"highway"\s*~\s*"\^\(([^\"]+)\)\$"\s*\]\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*;/i,
+  );
+  if (!match) return null;
+
+  const highways = match[1].split('|');
+  if (
+    highways.length === 0
+    || highways.some((highway) => !TRAFFIC_ROAD_HIGHWAYS.has(highway))
+  ) return null;
+
+  const south = Number(match[2]);
+  const west = Number(match[3]);
+  const north = Number(match[4]);
+  const east = Number(match[5]);
+  if (
+    ![south, west, north, east].every(Number.isFinite)
+    || south >= north
+    || west >= east
+    || south < -90 || north > 90
+    || west < -180 || east > 180
+    || north - south > OVERPASS_MAX_BBOX_DEG
+    || east - west > OVERPASS_MAX_BBOX_DEG
+  ) return null;
+
+  return { south, west, north, east, highways: new Set(highways) };
+}
+
+/** Decode the five XML entities that can occur in OSM attributes. */
+function decodeOsmXmlAttribute(value) {
+  return String(value || '')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&apos;', "'")
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&');
+}
+
+/** Read one standard double-quoted XML attribute from an element fragment. */
+function osmXmlAttribute(fragment, name) {
+  const match = String(fragment || '').match(new RegExp(`\\b${name}="([^"]*)"`));
+  return match ? decodeOsmXmlAttribute(match[1]) : null;
+}
+
+/**
+ * Convert the bounded OSM `/api/0.6/map` XML response into the Overpass-like
+ * `{elements:[{type:'way', tags, geometry}]}` shape consumed by traffic.js.
+ * The endpoint returns every referenced node alongside each way, so no extra
+ * node requests are necessary.
+ * @param {string} xml Raw OSM XML response.
+ * @param {Set<string>} [highways] Allowed highway values.
+ * @returns {{version:number, generator:string, elements:Array}}
+ */
+export function parseOsmMapRoads(xml, highways = TRAFFIC_ROAD_HIGHWAYS) {
+  const nodes = new Map();
+  const source = String(xml || '');
+
+  for (const match of source.matchAll(/<node\b([^>]*?)\/>/g)) {
+    const id = osmXmlAttribute(match[1], 'id');
+    const lat = Number(osmXmlAttribute(match[1], 'lat'));
+    const lon = Number(osmXmlAttribute(match[1], 'lon'));
+    if (id && Number.isFinite(lat) && Number.isFinite(lon)) {
+      nodes.set(id, { lat, lon });
+    }
+  }
+
+  const elements = [];
+  for (const match of source.matchAll(/<way\b([^>]*)>([\s\S]*?)<\/way>/g)) {
+    const wayId = osmXmlAttribute(match[1], 'id');
+    const body = match[2];
+    const tags = {};
+    for (const tagMatch of body.matchAll(/<tag\b([^>]*?)\/>/g)) {
+      const key = osmXmlAttribute(tagMatch[1], 'k');
+      if (key) tags[key] = osmXmlAttribute(tagMatch[1], 'v') || '';
+    }
+    if (!wayId || !highways.has(tags.highway)) continue;
+
+    const geometry = [];
+    for (const ndMatch of body.matchAll(/<nd\b([^>]*?)\/>/g)) {
+      const node = nodes.get(osmXmlAttribute(ndMatch[1], 'ref'));
+      if (node) geometry.push(node);
+    }
+    if (geometry.length < 2) continue;
+    elements.push({ type: 'way', id: wayId, tags, geometry });
+  }
+
+  return { version: 0.6, generator: 'gods-eye-view-osm-map-fallback', elements };
+}
+
+/**
+ * Fetch traffic road geometry from the standard OSM map API. Returns null for
+ * non-traffic Overpass queries so the generic Overpass proxy remains unchanged.
+ * @param {string} body URL-encoded Overpass QL query body.
+ * @param {number} [maxResponseBytes] Response cap.
+ * @param {object} [options] fetchImpl/readBody seams for tests.
+ * @returns {Promise<null|{status:number,body:string,contentType:string,endpoint:string,rateLimited:boolean,runtimeError:boolean}>}
+ */
+export async function fetchOsmMapRoadPayload(body, maxResponseBytes = OVERPASS_MAX_RESPONSE_BYTES, {
+  fetchImpl = fetch,
+  readBody = readResponseTextCapped,
+} = {}) {
+  const spec = trafficRoadQuerySpec(body);
+  if (!spec) return null;
+
+  const url = new URL(OSM_MAP_ENDPOINT);
+  url.searchParams.set('bbox', `${spec.west},${spec.south},${spec.east},${spec.north}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OSM_MAP_TIMEOUT_MS);
+  try {
+    const upstream = await fetchImpl(url, {
+      headers: {
+        Accept: 'application/xml',
+        'User-Agent': 'gods-eye-view-osm-map/1.0 (local traffic layer)',
+      },
+      signal: controller.signal,
+    });
+    const responseBody = await readBody(upstream, maxResponseBytes);
+    if (!upstream.ok) throw new Error(`OSM map returned ${upstream.status}`);
+    if (!/<osm\b/i.test(responseBody)) throw new Error('OSM map returned invalid XML');
+    const payload = parseOsmMapRoads(responseBody, spec.highways);
+    return {
+      status: 200,
+      body: JSON.stringify(payload),
+      contentType: 'application/json',
+      endpoint: OSM_MAP_ENDPOINT,
+      rateLimited: false,
+      runtimeError: false,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Traffic gets a fast bounded OSM map path, with generic Overpass as fallback. */
+async function fetchTrafficRoadGeometry(body) {
+  try {
+    const payload = await fetchOsmMapRoadPayload(body);
+    if (payload) {
+      console.log('[Overpass Proxy] traffic roads via OSM map API');
+      return payload;
+    }
+  } catch (error) {
+    console.warn('[Overpass Proxy] OSM map traffic path failed:', error?.message || error);
+  }
+  return fetchOverpassPayload(body);
+}
+
 /**
  * Try each mirror once, retaining response-size and per-mirror timeout caps.
  * Refusals and body-level failures rotate; total failure returns the last
@@ -2920,7 +3105,7 @@ function overpassProxy() {
             return;
           }
           _overpassConcurrent += 1;
-          const requestPromise = fetchOverpassPayload(safeBody)
+          const requestPromise = fetchTrafficRoadGeometry(safeBody)
             .then((payload) => {
               // Only a 2xx is data. `< 500` cached every 4xx, so one mirror's
               // refusal was written to memory AND disk — and boundary-class
@@ -4479,39 +4664,101 @@ async function loadTflSourcesFromOpenData() {
   }
 }
 
+// File and env packs are hand written, so check the URLs here.
+// Bad values become empty and the normal fallback takes over.
+const CCTV_SOURCE_URL_MAX_LENGTH = 2048;
+
 /**
- * Normalize a raw CCTV source item into a canonical shape with safe defaults.
+ * Clean a camera URL from a file or env pack.
  *
- * @param {object} item - Raw source from file, env, or Austin Open Data.
- * @returns {object} Normalized source with all expected fields populated.
+ * A typo or plain-http URL would otherwise sit unnoticed while the camera
+ * stays stuck on fallback holding a slot — or send the server fetching a
+ * URL it never should.
+ * @param {string} value - Raw URL text.
+ * @param {string} [cameraId] - Used only for the warning log.
+ * @returns {string} The clean URL, or '' when it must not be fetched.
  */
-function normalizeSourceItem(item) {
+export function sanitizeCctvSourceUrl(value, cameraId = '') {
+  if (typeof value !== 'string') return '';
+  const clean = value.trim();
+  if (!clean) return '';
+  const tag = cameraId ? ` for '${cameraId}'` : '';
+  if (clean.length > CCTV_SOURCE_URL_MAX_LENGTH) {
+    console.warn(`[CCTV] dropping overlong source URL${tag}`);
+    return '';
+  }
+  if (/\s/.test(clean)) {
+    console.warn(`[CCTV] dropping malformed source URL${tag}`);
+    return '';
+  }
+  let parsed;
+  try {
+    parsed = new URL(clean);
+  } catch {
+    console.warn(`[CCTV] dropping malformed source URL${tag}`);
+    return '';
+  }
+  if (parsed.username || parsed.password) {
+    console.warn(`[CCTV] dropping source URL with credentials${tag}`);
+    return '';
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  const host = parsed.hostname.toLowerCase();
+  const local = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  // Local http is fine for dev, anything else has to be https.
+  if (protocol === 'http:') {
+    if (!local) {
+      console.warn(`[CCTV] dropping non-https source URL${tag}`);
+      return '';
+    }
+    return clean;
+  }
+  if (protocol !== 'https:') {
+    console.warn(`[CCTV] dropping non-https source URL${tag}`);
+    return '';
+  }
+  if (!host || (!local && !host.includes('.'))) {
+    console.warn(`[CCTV] dropping malformed source URL${tag}`);
+    return '';
+  }
+  return clean;
+}
+
+/**
+ * Shape a raw pack entry into the form the proxy serves.
+ *
+ * @param {object} item - Raw entry from file, env, or live packs.
+ * @returns {object} Cleaned entry the proxy can use.
+ */
+export function normalizeSourceItem(item) {
+  const source = item && typeof item === 'object' ? item : {};
+  const id = String(source.id || '').trim();
   return {
-    id: String(item.id || '').trim(),
-    name: String(item.name || item.id || '').trim(),
-    city: String(item.city || ''),
-    cityId: String(item.cityId || ''),
-    provider: String(item.provider || 'Configured CCTV Source'),
-    lat: toFiniteNumber(item.lat),
-    lon: toFiniteNumber(item.lon),
-    headingDeg: toFiniteNumber(item.headingDeg),
-    headingConfidence: String(item.headingConfidence || item.headingSource || '').toLowerCase(),
-    pitchDeg: toFiniteNumber(item.pitchDeg),
-    fovDeg: toFiniteNumber(item.fovDeg),
-    rangeM: toFiniteNumber(item.rangeM),
-    mountHeightM: toFiniteNumber(item.mountHeightM),
-    groundElevationM: toFiniteNumber(item.groundElevationM),
-    feedType: normalizeFeedType(item.feedType || item.type || ''),
-    url: typeof item.url === 'string' ? item.url : '',
-    snapshotUrl: typeof item.snapshotUrl === 'string' ? item.snapshotUrl : '',
-    license: String(item.license || item.licenseNote || ''),
-    sourceKind: String(item.sourceKind || item.kind || 'configured'),
+    id,
+    name: String(source.name || source.id || '').trim(),
+    city: String(source.city || ''),
+    cityId: String(source.cityId || ''),
+    provider: String(source.provider || 'Configured CCTV Source'),
+    lat: toFiniteNumber(source.lat),
+    lon: toFiniteNumber(source.lon),
+    headingDeg: toFiniteNumber(source.headingDeg),
+    headingConfidence: String(source.headingConfidence || source.headingSource || '').toLowerCase(),
+    pitchDeg: toFiniteNumber(source.pitchDeg),
+    fovDeg: toFiniteNumber(source.fovDeg),
+    rangeM: toFiniteNumber(source.rangeM),
+    mountHeightM: toFiniteNumber(source.mountHeightM),
+    groundElevationM: toFiniteNumber(source.groundElevationM),
+    feedType: normalizeFeedType(source.feedType || source.type || ''),
+    url: sanitizeCctvSourceUrl(source.url, id),
+    snapshotUrl: sanitizeCctvSourceUrl(source.snapshotUrl, id),
+    license: String(source.license || source.licenseNote || ''),
+    sourceKind: String(source.sourceKind || source.kind || 'configured'),
     // Optional CAL badge input (cctv-v2 design §3b/§9.2, additive-only per the
     // global constraints — nothing else in this file changes): hand-authored
     // file/env catalog entries may declare poseSource:'curated' so the panel
     // badge can distinguish them from raw automated priors (e.g. Austin Open
     // Data, which never sets this field). Passed through as-is to the client.
-    poseSource: item.poseSource === 'curated' ? 'curated' : undefined,
+    poseSource: source.poseSource === 'curated' ? 'curated' : undefined,
   };
 }
 
