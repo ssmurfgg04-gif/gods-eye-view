@@ -226,6 +226,11 @@ export class DataLayerManager {
           entry.module = module;
           entry.moduleLoaded = true;
           setLiveLayerModule(entry.module.id, module);
+          try {
+            module.attachDataManager?.(this);
+          } catch (error) {
+            console.warn(`[Data] ${entry.module.id} attachDataManager error:`, error);
+          }
           // A params intent that arrived before the module existed is now
           // applicable through the ordinary lane.
           const pending = entry.pendingParamsForLazy;
@@ -331,9 +336,18 @@ export class DataLayerManager {
       // a second toggle during the awaited init()/first-update() of the first
       // interleaves: the disable branch runs while enable is mid-flight, the
       // interval is armed after the user already turned the layer off, and a
-      // subsequent enable arms a SECOND interval → 2× poll → OpenSky 429 (M1).
+      // subsequent enable arms a SECOND interval �+' 2A- poll �+' OpenSky 429 (M1).
       toggleChain: Promise.resolve(),
     });
+    // Optional manager handle for layers whose data lands outside their tick
+    // (transit proximity polls, directions placement): lets them repaint the
+    // row without importing the manager. Lazy stubs wire their live module on
+    // swap in _ensureModuleLoaded below.
+    try {
+      layerModule.attachDataManager?.(this);
+    } catch (error) {
+      console.warn(`[Data] ${layerModule.id} attachDataManager error:`, error);
+    }
   }
 
   /** Seal registration and prove each production layer has one share disposition. */
@@ -2476,6 +2490,16 @@ export class DataLayerManager {
       entry.append(swatch, text);
       container.appendChild(entry);
     }
+  }
+
+  /**
+   * Repaint the toggle panel now. For layers whose data arrives outside their
+   * manager tick (camera-driven loads such as transit proximity polls), so a
+   * row shows its count when the data lands instead of at the next interval.
+   * One DOM pass; skipped while the document is hidden.
+   */
+  refreshLayerStats() {
+    this._refreshTogglePanel();
   }
 
   _refreshTogglePanel() {

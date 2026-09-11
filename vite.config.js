@@ -49,6 +49,17 @@ import { defineConfig, loadEnv } from 'vite';
 import cesium from 'vite-plugin-cesium';
 import { normalizeRadioCountryInput } from './src/data/radioCountry.js';
 import { normalizeOsrmSteps } from './src/data/routeSteps.js';
+import { publicTransitCatalog } from './src/data/transitFeeds.js';
+import {
+  TRANSIT_PROXY_MAX_BODY_BYTES,
+  TRANSIT_PROXY_TIMEOUT_MS,
+  buildTransitSnapshot,
+  isAcceptableTransitUpstreamUrl,
+  resolveTransitRoute,
+  transitCacheState,
+  transitResponseHeaders,
+  transitUpstreamHeaders,
+} from './src/data/transitProxy.js';
 import { admitSameSiteRequest } from './src/localRequestGate.mjs';
 import {
   normalizeRegionalArticles,
@@ -883,6 +894,46 @@ export async function readResponseTextCapped(response, maxBytes) {
 /** Parse a fetch() JSON response only after enforcing a hard byte cap. */
 export async function readResponseJsonCapped(response, maxBytes) {
   return JSON.parse(await readResponseTextCapped(response, maxBytes));
+}
+
+/**
+ * Read a fetch() Response body as bytes with the same hard cap as
+ * readResponseTextCapped — for protobuf upstreams (GTFS-Realtime).
+ * Throws { code:'RESPONSE_TOO_LARGE' }.
+ */
+export async function readResponseBytesCapped(response, maxBytes) {
+  const tooLarge = () => {
+    const err = new Error('Upstream response too large');
+    err.code = 'RESPONSE_TOO_LARGE';
+    return err;
+  };
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw tooLarge();
+    return bytes;
+  }
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try { await reader.cancel(); } catch { /* no-op */ }
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 /**
@@ -3605,6 +3656,110 @@ function gbfsProxy() {
           res.end(JSON.stringify({ error: 'GBFS proxy error' }));
         }
       });
+    },
+  };
+}
+
+/**
+ * Vite plugin: GTFS-Realtime VehiclePositions proxy for the Transit layer.
+ *
+ *   GET /api/transit/feeds             → public catalog (coverage + credit)
+ *   GET /api/transit/vehicles/<feedId> → decoded snapshot as JSON
+ *
+ * Only URLs in `src/data/transitFeeds.js` are ever fetched — the browser
+ * names a registered id, never a URL (SECURITY.md). Redirects are followed
+ * (the registry is server-owned) but must land on https. Bytes are capped at
+ * TRANSIT_PROXY_MAX_BODY_BYTES and decoded server-side, so the browser never
+ * parses protobuf. Per feed: 15 s memory cache, single-flight refresh, and
+ * serve-stale-on-failure for up to 10 minutes. No disk cache — transit
+ * positions are worthless after a few minutes.
+ */
+function transitProxy() {
+  /** @type {Map<string, {at:number, body:string, host:string}>} feedId → snapshot */
+  const cache = new Map();
+  const inFlight = new Map();
+
+  function send(res, status, body, headers) {
+    res.writeHead(status, headers);
+    res.end(body);
+  }
+
+  async function refresh(feed) {
+    const upstream = await fetch(feed.url, {
+      signal: AbortSignal.timeout(TRANSIT_PROXY_TIMEOUT_MS),
+      headers: transitUpstreamHeaders(feed),
+      redirect: 'follow',
+    });
+    const finalUrl = upstream.url || feed.url;
+    if (!isAcceptableTransitUpstreamUrl(finalUrl)) {
+      throw new Error('upstream redirected off https');
+    }
+    if (!upstream.ok) {
+      const error = new Error(`upstream HTTP ${upstream.status}`);
+      error.upstreamStatus = upstream.status;
+      throw error;
+    }
+    const bytes = await readResponseBytesCapped(upstream, TRANSIT_PROXY_MAX_BODY_BYTES);
+    const snapshot = buildTransitSnapshot(feed, bytes, Date.now());
+    const entry = { at: snapshot.fetchedAt, body: JSON.stringify(snapshot), host: new URL(finalUrl).hostname };
+    cache.set(feed.id, entry);
+    return entry;
+  }
+
+  function install(middlewares) {
+    middlewares.use('/api/transit', async (req, res) => {
+      if (req.method !== 'GET') {
+        send(res, 405, JSON.stringify({ error: 'Method Not Allowed' }), transitResponseHeaders('NONE'));
+        return;
+      }
+      const route = resolveTransitRoute(req.url);
+      if (!route) {
+        send(res, 404, JSON.stringify({ error: 'Unknown transit feed' }), { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        return;
+      }
+      if (route.route === 'feeds') {
+        send(res, 200, JSON.stringify({ feeds: publicTransitCatalog() }), {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600',
+        });
+        return;
+      }
+      const { feed } = route;
+      const now = Date.now();
+      const cached = cache.get(feed.id);
+      const state = transitCacheState(cached, now);
+      if (state === 'fresh') {
+        send(res, 200, cached.body, transitResponseHeaders('HIT', cached.host));
+        return;
+      }
+      const request = coalesceProxyRequest(inFlight, feed.id, () => refresh(feed));
+      try {
+        const fresh = await request.promise;
+        send(res, 200, fresh.body, transitResponseHeaders(request.shared ? 'INFLIGHT' : 'MISS', fresh.host));
+      } catch (error) {
+        if (state === 'stale' && cached) {
+          if (!request.shared) console.warn(`[transit-proxy] ${feed.id} refresh failed (${error?.message || error}) — serving stale snapshot`);
+          send(res, 200, cached.body, transitResponseHeaders('STALE-ERROR', cached.host));
+          return;
+        }
+        if (!request.shared) console.warn(`[transit-proxy] ${feed.id} unavailable: ${error?.message || error}`);
+        send(
+          res,
+          error?.code === 'RESPONSE_TOO_LARGE' ? 502 : (Number.isInteger(error?.upstreamStatus) ? 502 : 504),
+          JSON.stringify({ error: 'Transit feed unavailable', feedId: feed.id }),
+          { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-GEV-Cache': 'NONE' },
+        );
+      }
+    });
+  }
+
+  return {
+    name: 'transit-proxy',
+    configureServer(server) {
+      install(server.middlewares);
+    },
+    configurePreviewServer(server) {
+      install(server.middlewares);
     },
   };
 }
@@ -7376,6 +7531,7 @@ export default defineConfig(({ mode }) => {
       cctvProxy(),
       radioBrowserProxy(),
       gbfsProxy(),
+      transitProxy(),
       adsbLolProxy(),
       aisLiveProxy(),
       trackBackfillProxies(),

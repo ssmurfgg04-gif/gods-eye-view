@@ -199,4 +199,12 @@ export const LAZY_LAYER_MANIFEST = Object.freeze([
     statsRefreshInterval: 5000,
     loader: () => import('./directions.js'),
   }),
+  Object.freeze({
+    id: 'transit',
+    name: 'Transit',
+    icon: '🚇',
+    source: 'GTFS-Realtime feeds',
+    updateInterval: 15000,
+    loader: () => import('./transit.js'),
+  }),
 ]);

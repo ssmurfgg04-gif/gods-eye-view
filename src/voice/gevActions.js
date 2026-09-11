@@ -185,6 +185,10 @@ const LAYER_ALIASES = new Map([
   ['directions', 'directions'],
   ['routing', 'directions'],
   ['route', 'directions'],
+  ['transit', 'transit'],
+  ['buses', 'transit'],
+  ['trains', 'transit'],
+  ['public transit', 'transit'],
 ]);
 
 const CITY_ALIASES = new Map([
