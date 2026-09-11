@@ -67,6 +67,25 @@ export const DATA_CREDITS = [
     html: 'Earthquakes: Data courtesy of the U.S. Geological Survey',
   },
   {
+    key: 'nifc-wfigs',
+    html:
+      'Wildfire incidents: National Interagency Fire Center WFIGS ' +
+      '(public incident tracking; prescribed burns excluded)',
+  },
+  {
+    key: 'openseamap',
+    html:
+      'Sea marks overlay: ' +
+      '<a href="https://www.openseamap.org" target="_blank" rel="noopener">© OpenSeaMap contributors</a>',
+  },
+  {
+    key: 'opensnowmap',
+    html:
+      'Ski pistes overlay: Map data ' +
+      '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a>, ' +
+      'SRTM | Map style © <a href="https://www.opensnowmap.org" target="_blank" rel="noopener">OpenSnowMap.org</a> (CC-BY-SA)',
+  },
+  {
     key: 'overpass',
     html:
       'Road geometry (traffic): ' +

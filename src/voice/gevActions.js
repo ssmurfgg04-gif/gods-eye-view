@@ -176,6 +176,12 @@ const LAYER_ALIASES = new Map([
   ['firms', 'local-firms'],
   ['fires', 'local-firms'],
   ['active fires', 'local-firms'],
+  ['wildfires', 'nifc-wildfires'],
+  ['wildfire incidents', 'nifc-wildfires'],
+  ['nifc', 'nifc-wildfires'],
+  ['sea marks', 'osm-overlays'],
+  ['ski pistes', 'osm-overlays'],
+  ['map overlays', 'osm-overlays'],
 ]);
 
 const CITY_ALIASES = new Map([

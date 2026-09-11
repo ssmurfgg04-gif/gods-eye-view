@@ -173,4 +173,21 @@ export const LAZY_LAYER_MANIFEST = Object.freeze([
       return { default: layer };
     }),
   }),
+  Object.freeze({
+    id: 'nifc-wildfires',
+    name: 'Wildfire Incidents (NIFC)',
+    icon: '🔥',
+    source: 'NIFC WFIGS',
+    updateInterval: 5 * 60 * 1000,
+    loader: () => import('./nifcWildfires.js'),
+  }),
+  Object.freeze({
+    id: 'osm-overlays',
+    name: 'Open Map Overlays',
+    icon: '🗺️',
+    source: 'OpenSeaMap / OpenSnowMap',
+    updateInterval: 0,
+    statsRefreshInterval: 5000,
+    loader: () => import('./osmOverlays.js'),
+  }),
 ]);
