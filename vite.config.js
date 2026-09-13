@@ -83,12 +83,21 @@ import {
 } from './src/keySetupCore.mjs';
 import { hardenCredentialFile } from './src/keySetupHardening.mjs';
 import {
+  TERRARIUM_MAX_TILES,
+  TERRARIUM_TILE_TIMEOUT_MS,
+  TERRARIUM_Z,
+  createTerrainCircuit,
+  decodeTerrariumHeight,
   fetchTerrainChunkWithRetry,
+  lonLatToTerrariumTile,
   parseTerrainPoints,
   resolveTerrainHeightRequest,
+  terrainCircuitOpen,
   terrainPointKey,
+  updateTerrainCircuit,
   validTerrainResult,
 } from './src/data/terrainHeightsProxy.js';
+import { ensureGeoidReady, geoidHeight } from './src/data/geoid.js';
 import { VOICE_MODELS, isKnownVoiceTier, resolveVoiceModel } from './src/voice/voiceCost.js';
 
 /** Resolve __dirname for ESM context. */
@@ -2526,6 +2535,106 @@ function terrainHeightsProxy() {
     return results;
   }
 
+  /** Circuit state for the Re:Earth upstream: fail fast while it is down. */
+  const circuit = createTerrainCircuit();
+
+  /**
+   * Sample Terrarium tiles (AWS elevation-tiles-prod, free, keyless) for
+   * points Re:Earth failed to answer. Orthometric tile elevations become
+   * ellipsoidal heights via the bundled EGM96 grid (h = H + N) — an
+   * approximation good to ~10 m, and real measured terrain rather than a
+   * geoid-only prior. Returns nulls for points no tile covers.
+   * @param {Array<[number, number]>} points lon/lat pairs.
+   * @returns {Promise<Array<object|null>>}
+   */
+  async function sampleTerrariumHeights(points) {
+    let sharp = null;
+    try {
+      const sharpMod = await import('sharp');
+      sharp = sharpMod?.default ?? sharpMod;
+      if (typeof sharp !== 'function') sharp = null;
+    } catch { sharp = null; }
+    if (!sharp) throw new Error('terrarium fallback needs sharp');
+    try {
+      await ensureGeoidReady();
+    } catch {
+      throw new Error('terrarium fallback needs the geoid grid');
+    }
+    const byTile = new Map();
+    points.forEach(([lon, lat], i) => {
+      const t = lonLatToTerrariumTile(lon, lat, TERRARIUM_Z);
+      if (!t) return;
+      const key = `${t.x}/${t.y}`;
+      if (!byTile.has(key)) byTile.set(key, []);
+      byTile.get(key).push(i);
+    });
+    const out = new Array(points.length).fill(null);
+    const tiles = [...byTile.entries()].slice(0, TERRARIUM_MAX_TILES);
+    await Promise.all(tiles.map(async ([key, idxs]) => {
+      const [x, y] = key.split('/').map(Number);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TERRARIUM_TILE_TIMEOUT_MS);
+      try {
+        const res = await fetch(
+          `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${TERRARIUM_Z}/${x}/${y}.png`,
+          { signal: controller.signal, headers: { 'User-Agent': 'gods-eye-view-terrarium/1.0 (local terrain fallback)' } },
+        );
+        if (!res.ok) return;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 1_000_000) return;
+        const { data, info } = await sharp(buf).raw().toBuffer({ resolveWithObject: true });
+        if (info.width !== 256 || info.height !== 256) return;
+        const channels = info.channels;
+        for (const i of idxs) {
+          const [lon, lat] = points[i];
+          const t = lonLatToTerrariumTile(lon, lat, TERRARIUM_Z);
+          const o = (Math.min(255, t.py) * 256 + Math.min(255, t.px)) * channels;
+          const elevation = decodeTerrariumHeight(data[o], data[o + 1], data[o + 2]);
+          if (!Number.isFinite(elevation)) continue;
+          let geoid;
+          try {
+            geoid = geoidHeight(lat, lon);
+          } catch { continue; }
+          out[i] = { lon, lat, elevation, geoid, ellipsoid: elevation + geoid, source: 'terrarium' };
+        }
+      } catch { /* tile failed; its points stay null */ }
+      finally { clearTimeout(timer); }
+    }));
+    return out;
+  }
+
+  /**
+   * Resilient missing-point fetch: Re:Earth first (with circuit fail-fast),
+   * Terrarium tiles when it fails. Never returns stale-marked data itself —
+   * the resolver owns caching and staleness.
+   */
+  async function fetchMissingResilient(points) {
+    if (!terrainCircuitOpen(circuit)) {
+      try {
+        const results = await fetchMissingSingleFlight(points);
+        updateTerrainCircuit(circuit, true);
+        return results;
+      } catch (error) {
+        const opened = updateTerrainCircuit(circuit, false);
+        if (opened) {
+          console.warn('[terrain-heights-proxy] Re:Earth circuit open: failing fast for 5 min, Terrarium fallback active');
+        }
+        const fallback = await sampleTerrariumHeights(points).catch(() => null);
+        if (fallback) return fallback;
+        throw error;
+      }
+    }
+    // Circuit open: skip Re:Earth entirely, go straight to Terrarium.
+    const error = new Error('terrain upstream circuit open');
+    error.quietLog = true;
+    try {
+      const fallback = await sampleTerrariumHeights(points);
+      return fallback;
+    } catch {
+      throw error;
+    }
+  }
+
   /** Coalesce concurrent requests for the same canonical missing-point list. */
   function fetchMissingSingleFlight(points) {
     const key = points.map(terrainPointKey).join(';');
@@ -2565,11 +2674,13 @@ function terrainHeightsProxy() {
           const outcome = await resolveTerrainHeightRequest({
             points,
             cache: mem,
-            fetchMissing: fetchMissingSingleFlight,
+            fetchMissing: fetchMissingResilient,
             ttlMs: TTL_MS,
           });
           if (outcome.cacheChanged) diskDirty = true;
-          if (outcome.upstreamError) {
+          // Circuit-open fast-fails log once at transition (see
+          // fetchMissingResilient), not on every request.
+          if (outcome.upstreamError && outcome.upstreamError.quietLog !== true) {
             console.warn(
               `[terrain-heights-proxy] refresh incomplete (${outcome.upstreamError?.message || outcome.upstreamError})`
               + ' — serving stale points when available'

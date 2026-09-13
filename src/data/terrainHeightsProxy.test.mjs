@@ -3,9 +3,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  TERRARIUM_Z,
+  createTerrainCircuit,
+  decodeTerrariumHeight,
   fetchTerrainChunkWithRetry,
+  lonLatToTerrariumTile,
   resolveTerrainHeightRequest,
+  terrainCircuitOpen,
   terrainPointKey,
+  updateTerrainCircuit,
 } from './terrainHeightsProxy.js';
 
 function result(id, ellipsoid) {
@@ -114,4 +120,34 @@ test('stale per-point entries serve through a failed refresh only when every poi
   });
   assert.equal(response.status, 200);
   assert.deepEqual(response.body.results.map((item) => item.id), ['stale-b', 'stale-a']);
+});
+
+test('circuit opens after consecutive failures and closes on success', () => {
+  const circuit = createTerrainCircuit();
+  assert.equal(terrainCircuitOpen(circuit, 0), false);
+  assert.equal(updateTerrainCircuit(circuit, false, 0), false);
+  assert.equal(updateTerrainCircuit(circuit, false, 1000), false);
+  assert.equal(updateTerrainCircuit(circuit, false, 2000), true, 'third failure opens');
+  assert.equal(terrainCircuitOpen(circuit, 2001), true);
+  assert.equal(terrainCircuitOpen(circuit, 2000 + 5 * 60_000 + 1), false, 'cooldown expires');
+  assert.equal(updateTerrainCircuit(circuit, true, 300_001), false);
+  assert.equal(circuit.failures, 0, 'success resets the count');
+  assert.equal(terrainCircuitOpen(circuit, 300_002), false);
+});
+
+test('Terrarium tile math matches the verified Austin tile', () => {
+  const tile = lonLatToTerrariumTile(-97.7431, 30.2672, TERRARIUM_Z);
+  assert.deepEqual(tile, { x: 3743, y: 6745, px: 154, py: 146 });
+  assert.equal(lonLatToTerrariumTile(0, 0).px >= 0, true);
+  assert.equal(lonLatToTerrariumTile(200, 0), null, 'out-of-range lon rejected');
+  assert.equal(lonLatToTerrariumTile(0, 100), null, 'out-of-range lat rejected');
+  assert.equal(lonLatToTerrariumTile(NaN, 0), null);
+});
+
+test('Terrarium decode follows R*256+G+B/256-32768', () => {
+  assert.equal(decodeTerrariumHeight(0, 0, 0), -32768);
+  assert.equal(decodeTerrariumHeight(128, 0, 0), 0);
+  // Live-measured Austin pixel decodes to ~149 m (verified 2026-09-13).
+  assert.ok(Math.abs(decodeTerrariumHeight(128, 149, 0) - 149) < 0.01);
+  assert.equal(decodeTerrariumHeight(NaN, 0, 0), null);
 });

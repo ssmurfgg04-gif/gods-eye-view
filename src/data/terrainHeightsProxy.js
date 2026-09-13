@@ -11,6 +11,88 @@ export const TERRAIN_RETRY_BUDGET_MS = 10_000;
 /** One initial attempt plus three bounded retries. */
 export const TERRAIN_MAX_ATTEMPTS = 4;
 
+/** Consecutive upstream failures that open the circuit. */
+export const TERRAIN_CIRCUIT_FAILURES = 3;
+
+/** How long an open circuit fails fast before a probe is allowed. */
+export const TERRAIN_CIRCUIT_COOLDOWN_MS = 5 * 60_000;
+
+/** Terrarium tile zoom for the fallback sampler (256px tiles, free, keyless). */
+export const TERRARIUM_Z = 14;
+
+/** Max tiles fetched per request by the fallback sampler (bounds latency). */
+export const TERRARIUM_MAX_TILES = 16;
+
+/** Per-tile fetch timeout for the fallback sampler. */
+export const TERRARIUM_TILE_TIMEOUT_MS = 15_000;
+
+/** Create fresh circuit state for the Re:Earth upstream. */
+export function createTerrainCircuit() {
+  return { failures: 0, openUntil: 0 };
+}
+
+/**
+ * Record one upstream outcome against the circuit.
+ * @param {{failures:number, openUntil:number}} state
+ * @param {boolean} ok True when the upstream answered (even a refusal).
+ * @param {number} [nowMs]
+ * @returns {boolean} True when this call newly opened the circuit.
+ */
+export function updateTerrainCircuit(state, ok, nowMs = Date.now()) {
+  if (ok) {
+    state.failures = 0;
+    state.openUntil = 0;
+    return false;
+  }
+  state.failures += 1;
+  if (state.failures >= TERRAIN_CIRCUIT_FAILURES && state.openUntil <= nowMs) {
+    state.openUntil = nowMs + TERRAIN_CIRCUIT_COOLDOWN_MS;
+    return true;
+  }
+  return false;
+}
+
+/** True while the circuit refuses upstream calls (fail fast, serve cache). */
+export function terrainCircuitOpen(state, nowMs = Date.now()) {
+  return state.openUntil > nowMs;
+}
+
+/**
+ * Tile + pixel for one lon/lat at a slippy-map zoom (Terrarium sampler).
+ * @param {number} lon
+ * @param {number} lat
+ * @param {number} [z]
+ * @returns {null|{x:number, y:number, px:number, py:number}}
+ */
+export function lonLatToTerrariumTile(lon, lat, z = TERRARIUM_Z) {
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  if (lon < -180 || lon > 180 || lat < -85 || lat > 85) return null;
+  const n = 2 ** z;
+  const xFloat = ((lon + 180) / 360) * n;
+  const latRad = (lat * Math.PI) / 180;
+  const yFloat = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
+  const x = Math.floor(xFloat);
+  const y = Math.floor(yFloat);
+  if (x < 0 || y < 0 || x >= n || y >= n) return null;
+  return {
+    x, y,
+    px: Math.max(0, Math.min(255, Math.floor((xFloat - x) * 256))),
+    py: Math.max(0, Math.min(255, Math.floor((yFloat - y) * 256))),
+  };
+}
+
+/**
+ * Decode one Terrarium pixel (R*256 + G + B/256 - 32768) to meters.
+ * @param {number} r
+ * @param {number} g
+ * @param {number} b
+ * @returns {number|null} Elevation or null for non-finite input.
+ */
+export function decodeTerrariumHeight(r, g, b) {
+  if (![r, g, b].every((v) => Number.isFinite(Number(v)))) return null;
+  return Number(r) * 256 + Number(g) + Number(b) / 256 - 32768;
+}
+
 /** @param {number} ms */
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
