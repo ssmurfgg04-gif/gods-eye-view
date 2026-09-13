@@ -2423,7 +2423,14 @@ function terrainHeightsProxy() {
   const TTL_MS = 30 * 24 * 3600_000;
   const CACHE_DIR = path.join(process.cwd(), '.gev-cache');
   const CACHE_PATH = path.join(CACHE_DIR, 'terrain-heights.json');
-  const UPSTREAM_CHUNK = 256;
+  // Measured 2026-09-13: the Re:Earth heights endpoint answers ~32 distinct
+  // points in ~7 s, stalls ~40 (≈10 s), and never answers 48+ (each chunk
+  // then burns the full 30 s attempt timeout and the boot batch collapses
+  // into serve-stale). Keep chunks small with margin.
+  const UPSTREAM_CHUNK = 32;
+  // Bounded parallelism across chunks: sequential 32-point chunks would turn
+  // a cold-boot 2000-point batch into minutes of stalled terrain.
+  const UPSTREAM_CONCURRENCY = 4;
   const MAX_POINTS = 2000;
 
   /** @type {Map<string, {at:number, result:object}>} keyed by canonical 5dp lon/lat. */
@@ -2482,7 +2489,8 @@ function terrainHeightsProxy() {
   }
 
   /**
-   * Fetch all missing chunks sequentially (upstream caps each call at 256).
+   * Fetch all missing chunks with bounded parallelism (32 points per call —
+   * the upstream stalls on larger distinct batches — up to 4 concurrent).
    *
    * The first try keeps its empirically required 30s timeout; network errors,
    * 429, and 5xx receive up to three jittered retries sharing a 10s added-time
@@ -2491,13 +2499,29 @@ function terrainHeightsProxy() {
    * @returns {Promise<Array<object>>}
    */
   async function fetchUpstreamAll(points) {
-    const results = [];
+    const chunks = [];
     for (let i = 0; i < points.length; i += UPSTREAM_CHUNK) {
-      const chunk = points.slice(i, i + UPSTREAM_CHUNK);
-      const chunkResults = await fetchTerrainChunkWithRetry(chunk);
+      chunks.push(points.slice(i, i + UPSTREAM_CHUNK));
+    }
+    const chunkResults = new Array(chunks.length);
+    let next = 0;
+    const workers = Array.from(
+      { length: Math.max(1, Math.min(UPSTREAM_CONCURRENCY, chunks.length)) },
+      async () => {
+        while (next < chunks.length) {
+          const index = next;
+          next += 1;
+          chunkResults[index] = await fetchTerrainChunkWithRetry(chunks[index]);
+        }
+      },
+    );
+    await Promise.all(workers);
+    const results = [];
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunkResults[i] || [];
       // Keep later chunks aligned even if a malformed upstream response omits
       // trailing positions. The resolver will reject each null individually.
-      for (let j = 0; j < chunk.length; j += 1) results.push(chunkResults[j] ?? null);
+      for (let j = 0; j < chunks[i].length; j += 1) results.push(chunk[j] ?? null);
     }
     return results;
   }
